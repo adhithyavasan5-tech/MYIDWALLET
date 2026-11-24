@@ -46,6 +46,7 @@ import com.myid.wallet.security.PinManager
 import com.myid.wallet.ui.theme.MyIDTheme
 import com.myid.wallet.util.PdfExporter
 import kotlinx.coroutines.launch
+import androidx.compose.ui.graphics.graphicsLayer
 
 class MainActivity : ComponentActivity() {
     private lateinit var repository: WalletRepository
