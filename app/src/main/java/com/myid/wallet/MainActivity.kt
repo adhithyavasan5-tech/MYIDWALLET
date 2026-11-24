@@ -496,8 +496,9 @@ private fun WalletRoot(
                                             ) { granted ->
                                                 if (granted) {
                                                     val file = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
-                                                    cameraUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-                                                    cameraLauncher.launch(cameraUri)
+                                                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                                                    cameraUri = uri
+                                                    cameraLauncher.launch(uri)
                                                 } else {
                                                     error = "Camera permission is required to capture an image."
                                                 }
