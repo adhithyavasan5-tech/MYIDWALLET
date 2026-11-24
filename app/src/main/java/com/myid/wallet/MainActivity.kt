@@ -479,17 +479,6 @@ private fun WalletRoot(
 
                                             var pendingSide by remember { mutableStateOf("front") }
                                             var cameraUri by remember { mutableStateOf<Uri?>(null) }
-                                            val cameraPermission = rememberLauncherForActivityResult(
-                                                ActivityResultContracts.RequestPermission()
-                                            ) { granted ->
-                                                if (granted) {
-                                                    val file = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
-                                                    cameraUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-                                                    cameraLauncher.launch(cameraUri)
-                                                } else {
-                                                    error = "Camera permission is required to capture an image."
-                                                }
-                                            }
                                             val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
                                                 if (success) {
                                                     cameraUri?.let { uri ->
@@ -500,6 +489,17 @@ private fun WalletRoot(
                                                             cropSide = pendingSide
                                                         } else error = "Could not read captured image."
                                                     }
+                                                }
+                                            }
+                                            val cameraPermission = rememberLauncherForActivityResult(
+                                                ActivityResultContracts.RequestPermission()
+                                            ) { granted ->
+                                                if (granted) {
+                                                    val file = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
+                                                    cameraUri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+                                                    cameraLauncher.launch(cameraUri)
+                                                } else {
+                                                    error = "Camera permission is required to capture an image."
                                                 }
                                             }
                                             val frontGallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
