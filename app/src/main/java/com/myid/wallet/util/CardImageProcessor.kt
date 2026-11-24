@@ -37,7 +37,7 @@ object CardImageProcessor {
         val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
         val sampled = decodeSampled(bytes)
         val orientation = context.contentResolver.openInputStream(uri)?.use {
-            ExifInterface(it).rotationDegrees
+            exifRotationDegrees(ExifInterface(it))
         } ?: 0
         return rotate(sampled, orientation)
     }
@@ -45,9 +45,17 @@ object CardImageProcessor {
     fun decodeFile(file: File): Bitmap? {
         val bytes = file.readBytes()
         val sampled = decodeSampled(bytes)
-        val orientation = ExifInterface(file.absolutePath).rotationDegrees
+        val orientation = exifRotationDegrees(ExifInterface(file.absolutePath))
         return rotate(sampled, orientation)
     }
+
+    private fun exifRotationDegrees(exif: ExifInterface): Int =
+        when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_UNDEFINED)) {
+            ExifInterface.ORIENTATION_ROTATE_90 -> 90
+            ExifInterface.ORIENTATION_ROTATE_180 -> 180
+            ExifInterface.ORIENTATION_ROTATE_270 -> 270
+            else -> 0
+        }
 
     private fun decodeSampled(bytes: ByteArray): Bitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
