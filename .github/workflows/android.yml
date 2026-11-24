@@ -37,6 +37,18 @@ jobs:
           yes | "$SDKMANAGER" --licenses >/dev/null 2>&1 || true
           "$SDKMANAGER" "platform-tools" "platforms;android-35" "build-tools;35.0.0"
 
+      - name: Verify Maven repository access
+        run: |
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            --retry-delay 2 --output /dev/null \
+            "https://dl.google.com/dl/android/maven2/com/android/tools/build/gradle/8.9.2/gradle-8.9.2.pom"
+          curl --fail --silent --show-error --location --retry 5 --retry-all-errors \
+            --retry-delay 2 --output /dev/null \
+            "https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-gradle-plugin/2.1.20/kotlin-gradle-plugin-2.1.20.pom"
+
+      - name: Resolve Android debug dependencies
+        run: gradle --no-daemon :app:dependencies --configuration debugRuntimeClasspath
+
       - name: Build Debug APK
         run: gradle --no-daemon assembleDebug --stacktrace --info
 
