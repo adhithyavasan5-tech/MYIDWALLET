@@ -18,6 +18,9 @@ interface DocumentDao {
     @Query("UPDATE documents SET isFavourite = :favourite WHERE id = :id")
     suspend fun setFavourite(id: String, favourite: Boolean)
 
+    @Query("UPDATE documents SET documentNumber = :number, holderName = :name, dateOfBirth = :dob, expiryDate = :expiry WHERE id = :id")
+    suspend fun updateMetadata(id: String, number: String?, name: String?, dob: String?, expiry: String?)
+
     @Delete
     suspend fun delete(document: DocumentEntity)
 }

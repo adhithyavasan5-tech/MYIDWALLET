@@ -11,5 +11,9 @@ data class DocumentEntity(
     val frontFile: String,
     val backFile: String?,
     val isFavourite: Boolean = false,
-    val createdAt: Long = System.currentTimeMillis()
+    val createdAt: Long = System.currentTimeMillis(),
+    val documentNumber: String? = null,
+    val holderName: String? = null,
+    val dateOfBirth: String? = null,
+    val expiryDate: String? = null
 )
