@@ -205,6 +205,11 @@ private fun WalletRoot(
                             2 -> AccountScreen(account, repository)
                         }
                     }
+                }
+            }
+        }
+    }
+}
 
                     @Composable
                     private fun PinScreen(
@@ -274,6 +279,36 @@ private fun WalletRoot(
                                     }
                                 }
 
+                            } else {
+                                Text("${documents.size} saved ${if (documents.size == 1) "card" else "cards"}",
+                                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Spacer(Modifier.height(12.dp))
+                                val pager = rememberPagerState(pageCount = { documents.size })
+                                HorizontalPager(state = pager, modifier = Modifier.fillMaxWidth().height(280.dp),
+                                    pageSpacing = 14.dp) { page ->
+                                    val doc = documents[page]
+                                    Card(
+                                        modifier = Modifier.fillMaxSize().padding(vertical = 6.dp).clickable { onOpen(doc) },
+                                        shape = RoundedCornerShape(24.dp),
+                                        elevation = CardDefaults.cardElevation(8.dp),
+                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                                    ) {
+                                        Box(Modifier.fillMaxSize()) {
+                                            EncryptedImage(repository, doc.frontFile)
+                                            Surface(
+                                                modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
+                                                shape = RoundedCornerShape(12.dp),
+                                                color = categoryFrameColor(doc.category)
+                                            ) {
+                                                Text(doc.category, Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                                                    color = Color.White, fontSize = 13.sp)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                                 @Composable
                                 private fun EncryptedImage(repository: WalletRepository, fileName: String) {
                                     var bitmap by remember(fileName) { mutableStateOf<Bitmap?>(null) }
@@ -285,6 +320,12 @@ private fun WalletRoot(
                                                 withContext(Dispatchers.Main) { bitmap = result }
                                             }
                                         }
+                                                }
+                                    if (bitmap != null) {
+                                        Image(bitmap!!.asImageBitmap(), null, Modifier.fillMaxSize(),
+                                            contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                                    }
+                                }
 
                                         @OptIn(ExperimentalMaterial3Api::class)
                                         @Composable
@@ -323,9 +364,11 @@ private fun WalletRoot(
                                                             backBytes = back
                                                         }
                                                     }
+                                                    }
+                                                }
 
                                                     @Composable
-                                                    private fun ImageSideSection(
+                                                    fun ImageSideSection(
                                                         title: String,
                                                         hasOptionalBack: Boolean,
                                                         bytes: ByteArray?,
@@ -366,7 +409,7 @@ private fun WalletRoot(
                                                     }
 
                                                     @Composable
-                                                    private fun CropEditorScreen(
+                                                    fun CropEditorScreen(
                                                         bitmap: Bitmap,
                                                         corners: CropCorners,
                                                         onCancel: () -> Unit,
@@ -412,318 +455,6 @@ private fun WalletRoot(
                                                                             state.value = c
                                                                         }
                                                                     }
-
-                                                                    @Composable
-                                                                    private fun CardDetailScreen(
-                                                                        document: DocumentEntity,
-                                                                        repository: WalletRepository,
-                                                                        onBack: () -> Unit,
-                                                                        onQuickShow: (DocumentEntity) -> Unit,
-                                                                        onEdit: (DocumentEntity) -> Unit,
-                                                                        onDelete: (DocumentEntity) -> Unit,
-                                                                        onSave: (List<ByteArray>) -> Unit,
-                                                                        onShare: (List<ByteArray>) -> Unit
-                                                                    ) {
-                                                                        var isBack by remember(document.id) { mutableStateOf(false) }
-                                                                        var front by remember(document.id) { mutableStateOf<ByteArray?>(null) }
-                                                                        var back by remember(document.id) { mutableStateOf<ByteArray?>(null) }
-                                                                        var error by remember { mutableStateOf<String?>(null) }
-                                                                        var deleteConfirm by remember { mutableStateOf(false) }
-                                                                        val rotation by animateFloatAsState(if (isBack) 180f else 0f, label = "cardFlip")
-
-                                                                        LaunchedEffect(document.id) {
-                                                                            withContext(Dispatchers.IO) {
-                                                                                val f = if (document.frontFile.isNotBlank()) repository.readEncryptedImage(document.frontFile) else null
-                                                                                val b = document.backFile?.let { repository.readEncryptedImage(it) }
-                                                                                withContext(Dispatchers.Main) { front = f; back = b }
-                                                                            }
-                                                                        }
-
-                                                                        @Composable
-                                                                        private fun AccountScreen(account: AccountEntity?, repository: WalletRepository) {
-                                                                            val context = LocalContext.current
-                                                                            val scope = rememberCoroutineScope()
-                                                                            var editing by remember { mutableStateOf(false) }
-                                                                            var deleteConfirm by remember { mutableStateOf(false) }
-                                                                            var name by remember(account) { mutableStateOf(account?.name ?: "") }
-                                                                            var age by remember(account) { mutableStateOf(account?.age?.toString() ?: "") }
-                                                                            var mobile by remember(account) { mutableStateOf(account?.mobile ?: "") }
-                                                                            var profileBytes by remember(account) { mutableStateOf<ByteArray?>(null) }
-                                                                            var removeProfile by remember(account) { mutableStateOf(false) }
-                                                                            var error by remember { mutableStateOf<String?>(null) }
-
-                                                                            LaunchedEffect(account?.profileFile) {
-                                                                                account?.profileFile?.let { file ->
-                                                                                    withContext(Dispatchers.IO) {
-                                                                                        val bytes = repository.readEncryptedImage(file)
-                                                                                        withContext(Dispatchers.Main) { profileBytes = bytes }
-                                                                                    }
-                                                                                } ?: run { profileBytes = null }
-                                                                            }
-
-                                                                            val profileGallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-                                                                                if (uri != null) {
-                                                                                    context.contentResolver.openInputStream(uri)?.use { input ->
-                                                                                        val bytes = input.readBytes()
-                                                                                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                                                                        if (bitmap != null) {
-                                                                                            val stream = ByteArrayOutputStream()
-                                                                                            val scaled = Bitmap.createScaledBitmap(bitmap,
-                                                                                                minOf(800, bitmap.width), minOf(800, bitmap.height), true)
-                                                                                            scaled.compress(Bitmap.CompressFormat.JPEG, 90, stream)
-                                                                                            profileBytes = stream.toByteArray()
-                                                                                            removeProfile = false
-                                                                                            scaled.recycle()
-                                                                                            bitmap.recycle()
-                                                                                        } else error = "Could not read profile image."
-                                                                                    }
-                                                                                }
-                                                                            }
-
-                                                                            if (editing) {
-                                                                                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
-                                                                                    TextButton(onClick = { editing = false; error = null }) {
-                                                                                        Icon(Icons.Default.ArrowBack, null); Text("Back")
-                                                                                    }
-                                                                                    Text("Edit Profile", fontSize = 27.sp, fontWeight = FontWeight.Bold)
-                                                                                    Spacer(Modifier.height(16.dp))
-                                                                                    ProfileAvatar(profileBytes)
-                                                                                    Spacer(Modifier.height(10.dp))
-                                                                                    Row(Modifier.fillMaxWidth()) {
-                                                                                        TextButton(onClick = {
-                                                                                            profileGallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                                                                                        }, Modifier.weight(1f)) { Text("Choose image") }
-                                                                                        if (profileBytes != null) TextButton(onClick = {
-                                                                                            profileBytes = null; removeProfile = true
-                                                                                        }, Modifier.weight(1f)) { Text("Remove", color = Color(0xFFDC2626)) }
-                                                                                    }
-                                                                                    OutlinedTextField(name, { name = it }, label = { Text("Name *") }, modifier = Modifier.fillMaxWidth())
-                                                                                    Spacer(Modifier.height(10.dp))
-                                                                                    OutlinedTextField(age, { age = it.filter { char -> char.isDigit() }.take(3) },
-                                                                                        label = { Text("Age *") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                                                                                        modifier = Modifier.fillMaxWidth())
-                                                                                    Spacer(Modifier.height(10.dp))
-                                                                                    OutlinedTextField(mobile, { mobile = it }, label = { Text("Mobile number (optional)") },
-                                                                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                                                                                        modifier = Modifier.fillMaxWidth())
-                                                                                    error?.let { Spacer(Modifier.height(8.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
-                                                                                    Spacer(Modifier.height(18.dp))
-                                                                                    Button(onClick = {
-                                                                                        val ageValue = age.toIntOrNull()
-                                                                                        if (name.isBlank()) error = "Name is required."
-                                                                                        else if (ageValue == null || ageValue !in 1..150) error = "Enter a valid age."
-                                                                                        else scope.launch {
-                                                                                            try {
-                                                                                                repository.saveAccount(account, name.trim(), ageValue, mobile.trim(), profileBytes, removeProfile)
-                                                                                                editing = false
-                                                                                                error = null
-                                                                                            } catch (e: Exception) { error = e.message ?: "Could not save profile." }
-                                                                                        }
-                                                                                    }, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Save Profile") }
-                                                                                }
-                                                                            } else {
-                                                                                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
-                                                                                    Spacer(Modifier.height(18.dp))
-                                                                                    Text("Account", fontSize = 27.sp, fontWeight = FontWeight.Bold)
-                                                                                    Spacer(Modifier.height(24.dp))
-                                                                                    ProfileAvatar(profileBytes)
-                                                                                    Spacer(Modifier.height(16.dp))
-                                                                                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-                                                                                        Text(account?.name ?: "No profile set", fontSize = 22.sp, fontWeight = FontWeight.Bold)
-                                                                                        account?.let {
-                                                                                            Text("Age ${it.age}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                                                            it.mobile?.takeIf(String::isNotBlank)?.let { number ->
-                                                                                                Spacer(Modifier.height(4.dp)); Text(number, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                                                            }
-                                                                                        }
-                                                                                    }
-                                                                                    Spacer(Modifier.height(24.dp))
-                                                                                    Button(onClick = { editing = true }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                                                                                        Icon(Icons.Default.Edit, null); Spacer(Modifier.width(8.dp)); Text("Edit Profile")
-                                                                                    }
-                                                                                    Spacer(Modifier.height(10.dp))
-                                                                                    OutlinedButton(onClick = { deleteConfirm = true }, modifier = Modifier.fillMaxWidth().height(52.dp),
-                                                                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFDC2626))) {
-                                                                                        Icon(Icons.Default.Delete, null); Spacer(Modifier.width(8.dp)); Text("Delete Account")
-                                                                                    }
-                                                                                }
-                                                                            }
-
-                                                                            if (deleteConfirm) {
-                                                                                AlertDialog(
-                                                                                    onDismissRequest = { deleteConfirm = false },
-                                                                                    title = { Text("Delete account profile?") },
-                                                                                    text = { Text("This deletes only your name, age, mobile number, and profile image. Your saved identity documents and wallet PIN will not be deleted.") },
-                                                                                    confirmButton = {
-                                                                                        TextButton(onClick = {
-                                                                                            deleteConfirm = false
-                                                                                            scope.launch { repository.deleteAccount(); name = ""; age = ""; mobile = ""; profileBytes = null }
-                                                                                        }) { Text("Delete", color = Color(0xFFDC2626)) }
-                                                                                    },
-                                                                                    dismissButton = { TextButton(onClick = { deleteConfirm = false }) { Text("Cancel") } }
-                                                                                )
-                                                                            }
-                                                                        }
-
-                                                                        private fun categoryFrameColor(category: String): Color = when {
-                                                                            category.contains("Aadhaar", ignoreCase = true) -> Color(0xCC1D4ED8)
-                                                                            category.contains("PAN", ignoreCase = true) -> Color(0xCC102A43)
-                                                                            category.contains("Driving", ignoreCase = true) -> Color(0xCC243B53)
-                                                                            category.contains("Voter", ignoreCase = true) -> Color(0xCC166534)
-                                                                            category.contains("Passport", ignoreCase = true) -> Color(0xCC1E3A5F)
-                                                                            else -> Color(0xCC475569)
-                                                                        }
-
-                                                                        @Composable
-                                                                        private fun ProfileAvatar(bytes: ByteArray?) {
-                                                                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                                                                                Surface(Modifier.size(116.dp), shape = CircleShape, color = Color(0xFFE5ECF5)) {
-                                                                                    if (bytes != null) {
-                                                                                        val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
-                                                                                        if (bitmap != null) Image(bitmap.asImageBitmap(), "Profile image",
-                                                                                            Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                                                                    } else Icon(Icons.Default.AccountCircle, null, Modifier.fillMaxSize().padding(18.dp),
-                                                                                        tint = Color(0xFF627D98))
-                                                                                }
-                                                                            }
-
-                                                                            @Composable
-                                                                            private fun QuickShowScreen(document: DocumentEntity, repository: WalletRepository, onExit: () -> Unit) {
-                                                                                var isBack by remember(document.id) { mutableStateOf(false) }
-                                                                                var front by remember(document.id) { mutableStateOf<ByteArray?>(null) }
-                                                                                var back by remember(document.id) { mutableStateOf<ByteArray?>(null) }
-                                                                                val rotation by animateFloatAsState(if (isBack) 180f else 0f, label = "quickShowFlip")
-
-                                                                                LaunchedEffect(document.id) {
-                                                                                    withContext(Dispatchers.IO) {
-                                                                                        val f = if (document.frontFile.isNotBlank()) repository.readEncryptedImage(document.frontFile) else null
-                                                                                        val b = document.backFile?.let { repository.readEncryptedImage(it) }
-                                                                                        withContext(Dispatchers.Main) { front = f; back = b }
-                                                                                    }
-                                                                                }
-
-                                                                                Box(
-                                                                                    Modifier.fillMaxSize().background(Color(0xFF102A43)).padding(16.dp),
-                                                                                    contentAlignment = Alignment.Center
-                                                                                ) {
-                                                                                    Column(Modifier.fillMaxSize()) {
-                                                                                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                                                                                            Spacer(Modifier.weight(1f))
-                                                                                            TextButton(onClick = onExit) { Text("Exit", color = Color.White) }
-                                                                                        }
-                                                                                        Spacer(Modifier.weight(1f))
-                                                                                        Card(
-                                                                                            Modifier.fillMaxWidth().height(260.dp).graphicsLayer {
-                                                                                                rotationY = rotation
-                                                                                                cameraDistance = 12 * density
-                                                                                            }.clickable {
-                                                                                                if (back != null) isBack = !isBack
-                                                                                            },
-                                                                                            shape = RoundedCornerShape(24.dp)
-                                                                                        ) {
-                                                                                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                                                                                val bytes = if (isBack) back else front
-                                                                                                if (bytes != null) {
-                                                                                                    val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
-                                                                                                    if (bitmap != null) {
-                                                                                                        Image(bitmap.asImageBitmap(), null, Modifier.fillMaxSize().graphicsLayer {
-                                                                                                            if (isBack) rotationY = 180f
-                                                                                                        }, contentScale = ContentScale.Fit)
-                                                                                                    }
-                                                                                                } else Text("Back side not added")
-                                                                                            }
-                                                                                        }
-                                                                                        Spacer(Modifier.weight(1f))
-                                                                                        Text(
-                                                                                            if (isBack) "Back side" else "Front side",
-                                                                                            Modifier.align(Alignment.CenterHorizontally),
-                                                                                            color = Color.White
-                                                                                        )
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                        }
-
-                                                                        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
-                                                                            TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text("Back") }
-                                                                            Text(document.category, fontSize = 25.sp, fontWeight = FontWeight.Bold)
-                                                                            Spacer(Modifier.height(18.dp))
-                                                                            Card(
-                                                                                modifier = Modifier.fillMaxWidth().height(260.dp).graphicsLayer {
-                                                                                    rotationY = rotation
-                                                                                    cameraDistance = 12 * density
-                                                                                }.clickable {
-                                                                                    if (back != null) isBack = !isBack
-                                                                                },
-                                                                                shape = RoundedCornerShape(24.dp),
-                                                                                elevation = CardDefaults.cardElevation(8.dp)
-                                                                            ) {
-                                                                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                                                                                    val bytes = if (isBack) back else front
-                                                                                    if (bytes != null) {
-                                                                                        val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
-                                                                                        if (bitmap != null) {
-                                                                                            Image(bitmap.asImageBitmap(), null, Modifier.fillMaxSize().graphicsLayer {
-                                                                                                if (isBack) rotationY = 180f
-                                                                                            }, contentScale = ContentScale.Fit)
-                                                                                        }
-                                                                                    } else {
-                                                                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                                                                            Text("Back side not added", fontWeight = FontWeight.SemiBold)
-                                                                                            Spacer(Modifier.height(8.dp))
-                                                                                            OutlinedButton(onClick = { onEdit(document) }) { Text("Add Back Side") }
-                                                                                        }
-                                                                                    }
-                                                                                }
-                                                                            }
-                                                                            Spacer(Modifier.height(10.dp))
-                                                                            Text(if (isBack) "BACK • Tap to flip" else "FRONT • Tap to flip",
-                                                                                modifier = Modifier.align(Alignment.CenterHorizontally),
-                                                                                color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                                            Spacer(Modifier.height(18.dp))
-                                                                            OutlinedButton(onClick = { onQuickShow(document) }, Modifier.fillMaxWidth().height(52.dp)) {
-                                                                                Text("QUICK SHOW")
-                                                                            }
-                                                                            Spacer(Modifier.height(8.dp))
-                                                                            Row(Modifier.fillMaxWidth()) {
-                                                                                OutlinedButton(onClick = {
-                                                                                    val sides = listOfNotNull(if (isBack) back else front)
-                                                                                    if (sides.isEmpty()) error = "No image available." else onSave(sides)
-                                                                                }, Modifier.weight(1f).height(52.dp)) {
-                                                                                    Icon(Icons.Default.Download, null); Spacer(Modifier.width(5.dp)); Text("SAVE")
-                                                                                }
-                                                                                Spacer(Modifier.width(8.dp))
-                                                                                OutlinedButton(onClick = {
-                                                                                    val sides = listOfNotNull(front, back)
-                                                                                    if (sides.isEmpty()) error = "No images available." else onShare(sides)
-                                                                                }, Modifier.weight(1f).height(52.dp)) {
-                                                                                    Icon(Icons.Default.Share, null); Spacer(Modifier.width(5.dp)); Text("SHARE")
-                                                                                }
-                                                                            }
-                                                                            Spacer(Modifier.height(8.dp))
-                                                                            Row(Modifier.fillMaxWidth()) {
-                                                                                OutlinedButton(onClick = { onEdit(document) }, Modifier.weight(1f).height(52.dp)) {
-                                                                                    Icon(Icons.Default.Edit, null); Spacer(Modifier.width(5.dp)); Text("EDIT")
-                                                                                }
-                                                                                Spacer(Modifier.width(8.dp))
-                                                                                OutlinedButton(onClick = { deleteConfirm = true }, Modifier.weight(1f).height(52.dp),
-                                                                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFDC2626))) {
-                                                                                    Icon(Icons.Default.Delete, null); Spacer(Modifier.width(5.dp)); Text("DELETE")
-                                                                                }
-                                                                            }
-                                                                            error?.let { Spacer(Modifier.height(8.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
-                                                                        }
-
-                                                                        if (deleteConfirm) {
-                                                                            AlertDialog(
-                                                                                onDismissRequest = { deleteConfirm = false },
-                                                                                title = { Text("Delete this card?") },
-                                                                                text = { Text("This permanently removes the card and both encrypted image files. Identity documents will not affect your account.") },
-                                                                                confirmButton = { TextButton(onClick = { deleteConfirm = false; onDelete(document) }) { Text("Delete", color = Color(0xFFDC2626)) } },
-                                                                                dismissButton = { TextButton(onClick = { deleteConfirm = false }) { Text("Cancel") } }
-                                                                            )
-                                                                        }
-                                                                    }
                                                                 ) {
                                                                     val c = state.value
                                                                     val points = listOf(c.topLeft, c.topRight, c.bottomRight, c.bottomLeft)
@@ -745,8 +476,6 @@ private fun WalletRoot(
                                                                 modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Use Cropped Card") }
                                                         }
                                                     }
-                                                }
-                                            }
 
                                             var pendingSide by remember { mutableStateOf("front") }
                                             var cameraUri by remember { mutableStateOf<Uri?>(null) }
@@ -901,44 +630,311 @@ private fun WalletRoot(
                                                 )
                                             }
                                         }
-                                    }
-                                    if (bitmap != null) {
-                                        Image(bitmap!!.asImageBitmap(), null, Modifier.fillMaxSize(),
-                                            contentScale = androidx.compose.ui.layout.ContentScale.Crop)
-                                    }
-                                }
-                            } else {
-                                Text("${documents.size} saved ${if (documents.size == 1) "card" else "cards"}",
-                                    fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                Spacer(Modifier.height(12.dp))
-                                val pager = rememberPagerState(pageCount = { documents.size })
-                                HorizontalPager(state = pager, modifier = Modifier.fillMaxWidth().height(280.dp),
-                                    pageSpacing = 14.dp) { page ->
-                                    val doc = documents[page]
-                                    Card(
-                                        modifier = Modifier.fillMaxSize().padding(vertical = 6.dp).clickable { onOpen(doc) },
-                                        shape = RoundedCornerShape(24.dp),
-                                        elevation = CardDefaults.cardElevation(8.dp),
-                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                                    ) {
-                                        Box(Modifier.fillMaxSize()) {
-                                            EncryptedImage(repository, doc.frontFile)
-                                            Surface(
-                                                modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
-                                                shape = RoundedCornerShape(12.dp),
-                                                color = categoryFrameColor(doc.category)
-                                            ) {
-                                                Text(doc.category, Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                                                    color = Color.White, fontSize = 13.sp)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
+                                                    @Composable
+                                                    private fun CardDetailScreen(
+                                                                        document: DocumentEntity,
+                                                                        repository: WalletRepository,
+                                                                        onBack: () -> Unit,
+                                                                        onQuickShow: (DocumentEntity) -> Unit,
+                                                                        onEdit: (DocumentEntity) -> Unit,
+                                                                        onDelete: (DocumentEntity) -> Unit,
+                                                                        onSave: (List<ByteArray>) -> Unit,
+                                                                        onShare: (List<ByteArray>) -> Unit
+                                                                    ) {
+                                                                        var isBack by remember(document.id) { mutableStateOf(false) }
+                                                                        var front by remember(document.id) { mutableStateOf<ByteArray?>(null) }
+                                                                        var back by remember(document.id) { mutableStateOf<ByteArray?>(null) }
+                                                                        var error by remember { mutableStateOf<String?>(null) }
+                                                                        var deleteConfirm by remember { mutableStateOf(false) }
+                                                                        val rotation by animateFloatAsState(if (isBack) 180f else 0f, label = "cardFlip")
+
+                                                                        LaunchedEffect(document.id) {
+                                                                            withContext(Dispatchers.IO) {
+                                                                                val f = if (document.frontFile.isNotBlank()) repository.readEncryptedImage(document.frontFile) else null
+                                                                                val b = document.backFile?.let { repository.readEncryptedImage(it) }
+                                                                                withContext(Dispatchers.Main) { front = f; back = b }
+                                                                            }
+                                                                        }
+
+                                                                        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
+                                                                            TextButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, null); Text("Back") }
+                                                                            Text(document.category, fontSize = 25.sp, fontWeight = FontWeight.Bold)
+                                                                            Spacer(Modifier.height(18.dp))
+                                                                            Card(
+                                                                                modifier = Modifier.fillMaxWidth().height(260.dp).graphicsLayer {
+                                                                                    rotationY = rotation
+                                                                                    cameraDistance = 12 * density
+                                                                                }.clickable {
+                                                                                    if (back != null) isBack = !isBack
+                                                                                },
+                                                                                shape = RoundedCornerShape(24.dp),
+                                                                                elevation = CardDefaults.cardElevation(8.dp)
+                                                                            ) {
+                                                                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                                                    val bytes = if (isBack) back else front
+                                                                                    if (bytes != null) {
+                                                                                        val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                                                                                        if (bitmap != null) {
+                                                                                            Image(bitmap.asImageBitmap(), null, Modifier.fillMaxSize().graphicsLayer {
+                                                                                                if (isBack) rotationY = 180f
+                                                                                            }, contentScale = ContentScale.Fit)
+                                                                                        }
+                                                                                    } else {
+                                                                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                                                                            Text("Back side not added", fontWeight = FontWeight.SemiBold)
+                                                                                            Spacer(Modifier.height(8.dp))
+                                                                                            OutlinedButton(onClick = { onEdit(document) }) { Text("Add Back Side") }
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                            }
+                                                                            Spacer(Modifier.height(10.dp))
+                                                                            Text(if (isBack) "BACK • Tap to flip" else "FRONT • Tap to flip",
+                                                                                modifier = Modifier.align(Alignment.CenterHorizontally),
+                                                                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                                            Spacer(Modifier.height(18.dp))
+                                                                            OutlinedButton(onClick = { onQuickShow(document) }, Modifier.fillMaxWidth().height(52.dp)) {
+                                                                                Text("QUICK SHOW")
+                                                                            }
+                                                                            Spacer(Modifier.height(8.dp))
+                                                                            Row(Modifier.fillMaxWidth()) {
+                                                                                OutlinedButton(onClick = {
+                                                                                    val sides = listOfNotNull(if (isBack) back else front)
+                                                                                    if (sides.isEmpty()) error = "No image available." else onSave(sides)
+                                                                                }, Modifier.weight(1f).height(52.dp)) {
+                                                                                    Icon(Icons.Default.Download, null); Spacer(Modifier.width(5.dp)); Text("SAVE")
+                                                                                }
+                                                                                Spacer(Modifier.width(8.dp))
+                                                                                OutlinedButton(onClick = {
+                                                                                    val sides = listOfNotNull(front, back)
+                                                                                    if (sides.isEmpty()) error = "No images available." else onShare(sides)
+                                                                                }, Modifier.weight(1f).height(52.dp)) {
+                                                                                    Icon(Icons.Default.Share, null); Spacer(Modifier.width(5.dp)); Text("SHARE")
+                                                                                }
+                                                                            }
+                                                                            Spacer(Modifier.height(8.dp))
+                                                                            Row(Modifier.fillMaxWidth()) {
+                                                                                OutlinedButton(onClick = { onEdit(document) }, Modifier.weight(1f).height(52.dp)) {
+                                                                                    Icon(Icons.Default.Edit, null); Spacer(Modifier.width(5.dp)); Text("EDIT")
+                                                                                }
+                                                                                Spacer(Modifier.width(8.dp))
+                                                                                OutlinedButton(onClick = { deleteConfirm = true }, Modifier.weight(1f).height(52.dp),
+                                                                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFDC2626))) {
+                                                                                    Icon(Icons.Default.Delete, null); Spacer(Modifier.width(5.dp)); Text("DELETE")
+                                                                                }
+                                                                            }
+                                                                            error?.let { Spacer(Modifier.height(8.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
+                                                                        }
+
+                                                                        if (deleteConfirm) {
+                                                                            AlertDialog(
+                                                                                onDismissRequest = { deleteConfirm = false },
+                                                                                title = { Text("Delete this card?") },
+                                                                                text = { Text("This permanently removes the card and both encrypted image files. Identity documents will not affect your account.") },
+                                                                                confirmButton = { TextButton(onClick = { deleteConfirm = false; onDelete(document) }) { Text("Delete", color = Color(0xFFDC2626)) } },
+                                                                                dismissButton = { TextButton(onClick = { deleteConfirm = false }) { Text("Cancel") } }
+                                                                            )
+                                                                        }
+                                                                    }
+                                                                        @Composable
+                                                                        private fun AccountScreen(account: AccountEntity?, repository: WalletRepository) {
+                                                                            val context = LocalContext.current
+                                                                            val scope = rememberCoroutineScope()
+                                                                            var editing by remember { mutableStateOf(false) }
+                                                                            var deleteConfirm by remember { mutableStateOf(false) }
+                                                                            var name by remember(account) { mutableStateOf(account?.name ?: "") }
+                                                                            var age by remember(account) { mutableStateOf(account?.age?.toString() ?: "") }
+                                                                            var mobile by remember(account) { mutableStateOf(account?.mobile ?: "") }
+                                                                            var profileBytes by remember(account) { mutableStateOf<ByteArray?>(null) }
+                                                                            var removeProfile by remember(account) { mutableStateOf(false) }
+                                                                            var error by remember { mutableStateOf<String?>(null) }
+
+                                                                            LaunchedEffect(account?.profileFile) {
+                                                                                account?.profileFile?.let { file ->
+                                                                                    withContext(Dispatchers.IO) {
+                                                                                        val bytes = repository.readEncryptedImage(file)
+                                                                                        withContext(Dispatchers.Main) { profileBytes = bytes }
+                                                                                    }
+                                                                                } ?: run { profileBytes = null }
+                                                                            }
+
+                                                                            val profileGallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+                                                                                if (uri != null) {
+                                                                                    context.contentResolver.openInputStream(uri)?.use { input ->
+                                                                                        val bytes = input.readBytes()
+                                                                                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                                                                        if (bitmap != null) {
+                                                                                            val stream = ByteArrayOutputStream()
+                                                                                            val scaled = Bitmap.createScaledBitmap(bitmap,
+                                                                                                minOf(800, bitmap.width), minOf(800, bitmap.height), true)
+                                                                                            scaled.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+                                                                                            profileBytes = stream.toByteArray()
+                                                                                            removeProfile = false
+                                                                                            scaled.recycle()
+                                                                                            bitmap.recycle()
+                                                                                        } else error = "Could not read profile image."
+                                                                                    }
+                                                                                }
+                                                                            }
+
+                                                                            if (editing) {
+                                                                                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
+                                                                                    TextButton(onClick = { editing = false; error = null }) {
+                                                                                        Icon(Icons.Default.ArrowBack, null); Text("Back")
+                                                                                    }
+                                                                                    Text("Edit Profile", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                                                                                    Spacer(Modifier.height(16.dp))
+                                                                                    ProfileAvatar(profileBytes)
+                                                                                    Spacer(Modifier.height(10.dp))
+                                                                                    Row(Modifier.fillMaxWidth()) {
+                                                                                        TextButton(onClick = {
+                                                                                            profileGallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                                                                        }, Modifier.weight(1f)) { Text("Choose image") }
+                                                                                        if (profileBytes != null) TextButton(onClick = {
+                                                                                            profileBytes = null; removeProfile = true
+                                                                                        }, Modifier.weight(1f)) { Text("Remove", color = Color(0xFFDC2626)) }
+                                                                                    }
+                                                                                    OutlinedTextField(name, { name = it }, label = { Text("Name *") }, modifier = Modifier.fillMaxWidth())
+                                                                                    Spacer(Modifier.height(10.dp))
+                                                                                    OutlinedTextField(age, { age = it.filter { char -> char.isDigit() }.take(3) },
+                                                                                        label = { Text("Age *") }, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                                                                        modifier = Modifier.fillMaxWidth())
+                                                                                    Spacer(Modifier.height(10.dp))
+                                                                                    OutlinedTextField(mobile, { mobile = it }, label = { Text("Mobile number (optional)") },
+                                                                                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
+                                                                                        modifier = Modifier.fillMaxWidth())
+                                                                                    error?.let { Spacer(Modifier.height(8.dp)); Text(it, color = MaterialTheme.colorScheme.error) }
+                                                                                    Spacer(Modifier.height(18.dp))
+                                                                                    Button(onClick = {
+                                                                                        val ageValue = age.toIntOrNull()
+                                                                                        if (name.isBlank()) error = "Name is required."
+                                                                                        else if (ageValue == null || ageValue !in 1..150) error = "Enter a valid age."
+                                                                                        else scope.launch {
+                                                                                            try {
+                                                                                                repository.saveAccount(account, name.trim(), ageValue, mobile.trim(), profileBytes, removeProfile)
+                                                                                                editing = false
+                                                                                                error = null
+                                                                                            } catch (e: Exception) { error = e.message ?: "Could not save profile." }
+                                                                                        }
+                                                                                    }, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Save Profile") }
+                                                                                }
+                                                                            } else {
+                                                                                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
+                                                                                    Spacer(Modifier.height(18.dp))
+                                                                                    Text("Account", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                                                                                    Spacer(Modifier.height(24.dp))
+                                                                                    ProfileAvatar(profileBytes)
+                                                                                    Spacer(Modifier.height(16.dp))
+                                                                                    Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                                                                                        Text(account?.name ?: "No profile set", fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                                                                                        account?.let {
+                                                                                            Text("Age ${it.age}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                                                            it.mobile?.takeIf(String::isNotBlank)?.let { number ->
+                                                                                                Spacer(Modifier.height(4.dp)); Text(number, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                                                            }
+                                                                                        }
+                                                                                    }
+                                                                                    Spacer(Modifier.height(24.dp))
+                                                                                    Button(onClick = { editing = true }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                                                                                        Icon(Icons.Default.Edit, null); Spacer(Modifier.width(8.dp)); Text("Edit Profile")
+                                                                                    }
+                                                                                    Spacer(Modifier.height(10.dp))
+                                                                                    OutlinedButton(onClick = { deleteConfirm = true }, modifier = Modifier.fillMaxWidth().height(52.dp),
+                                                                                        colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFDC2626))) {
+                                                                                        Icon(Icons.Default.Delete, null); Spacer(Modifier.width(8.dp)); Text("Delete Account")
+                                                                                    }
+                                                                                }
+                                                                            }
+
+                                                                            if (deleteConfirm) {
+                                                                                AlertDialog(
+                                                                                    onDismissRequest = { deleteConfirm = false },
+                                                                                    title = { Text("Delete account profile?") },
+                                                                                    text = { Text("This deletes only your name, age, mobile number, and profile image. Your saved identity documents and wallet PIN will not be deleted.") },
+                                                                                    confirmButton = {
+                                                                                        TextButton(onClick = {
+                                                                                            deleteConfirm = false
+                                                                                            scope.launch { repository.deleteAccount(); name = ""; age = ""; mobile = ""; profileBytes = null }
+                                                                                        }) { Text("Delete", color = Color(0xFFDC2626)) }
+                                                                                    },
+                                                                                    dismissButton = { TextButton(onClick = { deleteConfirm = false }) { Text("Cancel") } }
+                                                                                )
+                                                                            }
+                                                                        }
+
+                                                                        private fun categoryFrameColor(category: String): Color = when {
+                                                                            category.contains("Aadhaar", ignoreCase = true) -> Color(0xCC1D4ED8)
+                                                                            category.contains("PAN", ignoreCase = true) -> Color(0xCC102A43)
+                                                                            category.contains("Driving", ignoreCase = true) -> Color(0xCC243B53)
+                                                                            category.contains("Voter", ignoreCase = true) -> Color(0xCC166534)
+                                                                            category.contains("Passport", ignoreCase = true) -> Color(0xCC1E3A5F)
+                                                                            else -> Color(0xCC475569)
+                                                                        }
+                                                                        @Composable
+                                                                        private fun ProfileAvatar(bytes: ByteArray?) {
+                                                                            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                                                                Surface(Modifier.size(116.dp), shape = CircleShape, color = Color(0xFFE5ECF5)) {
+                                                                                    if (bytes != null) {
+                                                                                        val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                                                                                        if (bitmap != null) Image(bitmap.asImageBitmap(), "Profile image",
+                                                                                            Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                                                                    } else Icon(Icons.Default.AccountCircle, null, Modifier.fillMaxSize().padding(18.dp),
+                                                                                        tint = Color(0xFF627D98))
+                                                                                }
+                                                                            }
+                                                                        }
+                                                                            @Composable
+                                                                            private fun QuickShowScreen(document: DocumentEntity, repository: WalletRepository, onExit: () -> Unit) {
+                                                                                var isBack by remember(document.id) { mutableStateOf(false) }
+                                                                                var front by remember(document.id) { mutableStateOf<ByteArray?>(null) }
+                                                                                var back by remember(document.id) { mutableStateOf<ByteArray?>(null) }
+                                                                                val rotation by animateFloatAsState(if (isBack) 180f else 0f, label = "quickShowFlip")
+
+                                                                                LaunchedEffect(document.id) {
+                                                                                    withContext(Dispatchers.IO) {
+                                                                                        val f = if (document.frontFile.isNotBlank()) repository.readEncryptedImage(document.frontFile) else null
+                                                                                        val b = document.backFile?.let { repository.readEncryptedImage(it) }
+                                                                                        withContext(Dispatchers.Main) { front = f; back = b }
+                                                                                    }
+                                                                                }
+
+                                                                                Box(
+                                                                                    Modifier.fillMaxSize().background(Color(0xFF102A43)).padding(16.dp),
+                                                                                    contentAlignment = Alignment.Center
+                                                                                ) {
+                                                                                    Column(Modifier.fillMaxSize()) {
+                                                                                        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                                                                                            Spacer(Modifier.weight(1f))
+                                                                                            TextButton(onClick = onExit) { Text("Exit", color = Color.White) }
+                                                                                        }
+                                                                                        Spacer(Modifier.weight(1f))
+                                                                                        Card(
+                                                                                            Modifier.fillMaxWidth().height(260.dp).graphicsLayer {
+                                                                                                rotationY = rotation
+                                                                                                cameraDistance = 12 * density
+                                                                                            }.clickable {
+                                                                                                if (back != null) isBack = !isBack
+                                                                                            },
+                                                                                            shape = RoundedCornerShape(24.dp)
+                                                                                        ) {
+                                                                                            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                                                                                val bytes = if (isBack) back else front
+                                                                                                if (bytes != null) {
+                                                                                                    val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                                                                                                    if (bitmap != null) {
+                                                                                                        Image(bitmap.asImageBitmap(), null, Modifier.fillMaxSize().graphicsLayer {
+                                                                                                            if (isBack) rotationY = 180f
+                                                                                                        }, contentScale = ContentScale.Fit)
+                                                                                                    }
+                                                                                                } else Text("Back side not added")
+                                                                                            }
+                                                                                        }
+                                                                                        Spacer(Modifier.weight(1f))
+                                                                                        Text(
+                                                                                            if (isBack) "Back side" else "Front side",
+                                                                                            Modifier.align(Alignment.CenterHorizontally),
+                                                                                            color = Color.White
+                                                                                        )
+                                                                                    }
+                                                                                }
+                                                                            }
