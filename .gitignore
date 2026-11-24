@@ -1,0 +1,15 @@
+.gradle/
+.idea/
+local.properties
+/build/
+**/build/
+*.iml
+.DS_Store
+
+# Secrets and environment files
+.env
+.env.*
+!.env.example
+*.jks
+*.keystore
+secrets/
