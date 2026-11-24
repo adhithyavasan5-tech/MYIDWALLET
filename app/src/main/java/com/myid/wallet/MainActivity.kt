@@ -8,6 +8,7 @@ import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -36,14 +37,20 @@ import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Favorite
+import androidx.compose.material.icons.filled.FavoriteBorder
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Person
+import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -136,6 +143,7 @@ private fun rememberDecodedBitmap(bytes: ByteArray?, maxSide: Int): Bitmap? {
 internal class WalletSessionViewModel : ViewModel() {
     val unlocked = mutableStateOf(false)
     val nav = mutableStateOf(0)
+    val searchQuery = mutableStateOf("")
     val selected = mutableStateOf<DocumentEntity?>(null)
     val editing = mutableStateOf<DocumentEntity?>(null)
     val showAdd = mutableStateOf(false)
@@ -203,6 +211,8 @@ private fun WalletRoot(
 ) {
     val session: WalletSessionViewModel = viewModel()
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val tabStateHolder = rememberSaveableStateHolder()
     val documents by repository.documents.collectAsState(initial = emptyList())
     val account by repository.account.collectAsState(initial = null)
     var unlocked by session.unlocked
@@ -210,8 +220,15 @@ private fun WalletRoot(
     var pin by remember { mutableStateOf("") }
     var confirmPin by remember { mutableStateOf("") }
     var pinError by remember { mutableStateOf<String?>(null) }
-    var dark by remember { mutableStateOf(false) }
+    var themeMode by remember {
+        mutableStateOf(
+            context.getSharedPreferences("wallet_settings", android.content.Context.MODE_PRIVATE)
+                .getString("theme_mode", "system") ?: "system"
+        )
+    }
+    val dark = themeMode == "dark" || (themeMode == "system" && androidx.compose.foundation.isSystemInDarkTheme())
     var nav by session.nav
+    var searchQuery by session.searchQuery
     var selected by session.selected
     var editing by session.editing
     var showAdd by session.showAdd
@@ -250,26 +267,71 @@ private fun WalletRoot(
                     repository = repository,
                     onCancel = { showAdd = false; editing = null },
                     onSaved = { showAdd = false; editing = null; nav = 0 })
-                else -> Scaffold(
+                else -> {
+                    BackHandler(enabled = nav != 0) { nav = 0 }
+                    Scaffold(
                     bottomBar = {
                         NavigationBar(containerColor = MaterialTheme.colorScheme.surface) {
                             NavigationBarItem(selected = nav == 0, onClick = { nav = 0 },
                                 icon = { Icon(Icons.Default.Home, null) }, label = { Text("Home") })
                             NavigationBarItem(selected = nav == 1, onClick = { nav = 1 },
-                                icon = { Icon(Icons.Default.Add, null) }, label = { Text("Add") })
+                                icon = { Icon(Icons.Default.Search, null) }, label = { Text("Search") })
                             NavigationBarItem(selected = nav == 2, onClick = { nav = 2 },
-                                icon = { Icon(Icons.Default.AccountCircle, null) }, label = { Text("Account") })
+                                icon = { Icon(Icons.Default.Favorite, null) }, label = { Text("Favourites") })
+                            NavigationBarItem(selected = nav == 3, onClick = { nav = 3 },
+                                icon = { Icon(Icons.Default.Person, null) }, label = { Text("Profile") })
+                            NavigationBarItem(selected = nav == 4, onClick = { nav = 4 },
+                                icon = { Icon(Icons.Default.Settings, null) }, label = { Text("Settings") })
                         }
                     }) { padding ->
                     Box(Modifier.padding(padding)) {
                         when (nav) {
-                            0 -> HomeScreen(documents, repository, onOpen = { selected = it },
-                                onAdd = { editing = null; showAdd = true }, dark = dark, onDark = { dark = it })
-                            1 -> AddDocumentScreen(existing = null, repository = repository,
-                                onCancel = { nav = 0 }, onSaved = { nav = 0 })
-                            2 -> AccountScreen(account, repository)
+                            0 -> tabStateHolder.SaveableStateProvider("home") {
+                                HomeScreen(documents, repository, onOpen = { selected = it },
+                                    onAdd = { editing = null; showAdd = true }, dark = dark,
+                                    onDark = { isDark ->
+                                        val mode = if (isDark) "dark" else "light"
+                                        context.getSharedPreferences("wallet_settings", android.content.Context.MODE_PRIVATE)
+                                            .edit().putString("theme_mode", mode).apply()
+                                        themeMode = mode
+                                    },
+                                    onToggleFavourite = { document -> scope.launch { repository.favourite(document) } })
+                            }
+                            1 -> tabStateHolder.SaveableStateProvider("search") {
+                                SearchScreen(
+                                    documents = documents,
+                                    repository = repository,
+                                    query = searchQuery,
+                                    onQueryChange = { searchQuery = it },
+                                    onOpen = { selected = it },
+                                    onToggleFavourite = { document -> scope.launch { repository.favourite(document) } }
+                                )
+                            }
+                            2 -> tabStateHolder.SaveableStateProvider("favourites") {
+                                FavouritesScreen(
+                                    documents = documents.filter { it.isFavourite },
+                                    repository = repository,
+                                    onOpen = { selected = it },
+                                    onToggleFavourite = { document -> scope.launch { repository.favourite(document) } }
+                                )
+                            }
+                            3 -> tabStateHolder.SaveableStateProvider("profile") {
+                                AccountScreen(account, repository)
+                            }
+                            4 -> tabStateHolder.SaveableStateProvider("settings") {
+                                SettingsScreen(
+                                    themeMode = themeMode,
+                                    onThemeModeChange = { mode ->
+                                        context.getSharedPreferences("wallet_settings", android.content.Context.MODE_PRIVATE)
+                                            .edit().putString("theme_mode", mode).apply()
+                                        themeMode = mode
+                                    },
+                                    pinManager = pinManager
+                                )
+                            }
                         }
                     }
+                }
                 }
             }
         }
@@ -321,7 +383,8 @@ private fun WalletRoot(
                         onOpen: (DocumentEntity) -> Unit,
                         onAdd: () -> Unit,
                         dark: Boolean,
-                        onDark: (Boolean) -> Unit
+                        onDark: (Boolean) -> Unit,
+                        onToggleFavourite: (DocumentEntity) -> Unit
                     ) {
                         Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
                             Spacer(Modifier.height(18.dp))
@@ -332,6 +395,12 @@ private fun WalletRoot(
                                 }
                                 TextButton(onClick = { onDark(!dark) }) { Text(if (dark) "Light" else "Dark") }
                             }
+                            Spacer(Modifier.height(12.dp))
+                            Button(onClick = onAdd, modifier = Modifier.fillMaxWidth().height(50.dp)) {
+                                Icon(Icons.Default.Add, null)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Add New Document")
+                            }
                             Spacer(Modifier.height(18.dp))
                             if (documents.isEmpty()) {
                                 Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -340,6 +409,8 @@ private fun WalletRoot(
                                         Spacer(Modifier.height(12.dp))
                                         Text("Your wallet is empty", fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
                                         Text("Add your first identity card", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        Spacer(Modifier.height(12.dp))
+                                        OutlinedButton(onClick = onAdd) { Text("Add a document") }
                                     }
                                 }
 
@@ -385,11 +456,19 @@ private fun WalletRoot(
                                                         )
                                                     }
                                                 }
+                                                IconButton(onClick = { onToggleFavourite(doc) }) {
+                                                    Icon(
+                                                        if (doc.isFavourite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                                        contentDescription = if (doc.isFavourite) "Remove favourite" else "Add favourite",
+                                                        tint = if (doc.isFavourite) Color(0xFFDC2626)
+                                                        else MaterialTheme.colorScheme.onSurfaceVariant
+                                                    )
+                                                }
                                                 Icon(
                                                     Icons.Default.ChevronRight,
                                                     contentDescription = "Open ${doc.title.ifBlank { doc.category }}",
                                                     tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
-                                                    modifier = Modifier.padding(end = 14.dp).size(22.dp)
+                                                    modifier = Modifier.padding(end = 12.dp).size(22.dp)
                                                 )
                                             }
                                         }
@@ -398,6 +477,141 @@ private fun WalletRoot(
                             }
                         }
                     }
+
+                                @Composable
+                                private fun SearchScreen(
+                                    documents: List<DocumentEntity>,
+                                    repository: WalletRepository,
+                                    query: String,
+                                    onQueryChange: (String) -> Unit,
+                                    onOpen: (DocumentEntity) -> Unit,
+                                    onToggleFavourite: (DocumentEntity) -> Unit
+                                ) {
+                                    val matches = remember(documents, query) {
+                                        val term = query.trim()
+                                        if (term.isEmpty()) emptyList() else documents.filter {
+                                            it.title.contains(term, ignoreCase = true) ||
+                                                it.category.contains(term, ignoreCase = true)
+                                        }
+                                    }
+                                    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
+                                        Spacer(Modifier.height(18.dp))
+                                        Text("Search", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                                        Spacer(Modifier.height(14.dp))
+                                        OutlinedTextField(
+                                            value = query,
+                                            onValueChange = onQueryChange,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            singleLine = true,
+                                            label = { Text("Document name or type") },
+                                            trailingIcon = {
+                                                if (query.isNotEmpty()) TextButton(onClick = { onQueryChange("") }) {
+                                                    Text("Clear")
+                                                }
+                                            }
+                                        )
+                                        Spacer(Modifier.height(14.dp))
+                                        when {
+                                            query.isBlank() -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                                Text("Search your saved documents by name or type.",
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                            matches.isEmpty() -> Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                                Text("No documents match “$query”.",
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                            else -> DocumentResults(
+                                                documents = matches,
+                                                repository = repository,
+                                                onOpen = onOpen,
+                                                onToggleFavourite = onToggleFavourite
+                                            )
+                                        }
+                                    }
+                                }
+
+                                @Composable
+                                private fun FavouritesScreen(
+                                    documents: List<DocumentEntity>,
+                                    repository: WalletRepository,
+                                    onOpen: (DocumentEntity) -> Unit,
+                                    onToggleFavourite: (DocumentEntity) -> Unit
+                                ) {
+                                    Column(Modifier.fillMaxSize().padding(horizontal = 20.dp)) {
+                                        Spacer(Modifier.height(18.dp))
+                                        Text("Favourites", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                                        Spacer(Modifier.height(14.dp))
+                                        if (documents.isEmpty()) {
+                                            Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                                Text("Documents you favourite will appear here.",
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        } else {
+                                            DocumentResults(
+                                                documents = documents,
+                                                repository = repository,
+                                                onOpen = onOpen,
+                                                onToggleFavourite = onToggleFavourite
+                                            )
+                                        }
+                                    }
+                                }
+
+                                @Composable
+                                private fun DocumentResults(
+                                    documents: List<DocumentEntity>,
+                                    repository: WalletRepository,
+                                    onOpen: (DocumentEntity) -> Unit,
+                                    onToggleFavourite: (DocumentEntity) -> Unit
+                                ) {
+                                    LazyColumn(
+                                        modifier = Modifier.fillMaxSize(),
+                                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                                        contentPadding = PaddingValues(bottom = 16.dp)
+                                    ) {
+                                        items(documents, key = { it.id }) { doc ->
+                                            Card(
+                                                modifier = Modifier.fillMaxWidth().clickable { onOpen(doc) },
+                                                shape = RoundedCornerShape(18.dp),
+                                                elevation = CardDefaults.cardElevation(2.dp)
+                                            ) {
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth().height(112.dp),
+                                                    verticalAlignment = Alignment.CenterVertically
+                                                ) {
+                                                    Box(Modifier.width(112.dp).fillMaxHeight()) {
+                                                        EncryptedImage(repository, doc.frontFile)
+                                                    }
+                                                    Column(
+                                                        modifier = Modifier.weight(1f).padding(horizontal = 16.dp, vertical = 12.dp),
+                                                        verticalArrangement = Arrangement.Center
+                                                    ) {
+                                                        Text(doc.title.ifBlank { doc.category }, fontWeight = FontWeight.SemiBold)
+                                                        if (doc.title.isNotBlank() && doc.title != doc.category) {
+                                                            Spacer(Modifier.height(4.dp))
+                                                            Text(doc.category, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                        }
+                                                    }
+                                                    IconButton(onClick = { onToggleFavourite(doc) }) {
+                                                        Icon(
+                                                            if (doc.isFavourite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                                                            contentDescription = if (doc.isFavourite) "Remove favourite" else "Add favourite",
+                                                            tint = if (doc.isFavourite) Color(0xFFDC2626)
+                                                            else MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
+                                                    Icon(
+                                                        Icons.Default.ChevronRight,
+                                                        contentDescription = "Open ${doc.title.ifBlank { doc.category }}",
+                                                        tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                                                        modifier = Modifier.padding(end = 12.dp).size(22.dp)
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
                                 @Composable
                                 private fun EncryptedImage(repository: WalletRepository, fileName: String) {
                                     var bitmap by remember(fileName) { mutableStateOf<Bitmap?>(null) }
@@ -467,11 +681,14 @@ private fun WalletRoot(
                                             var cropProcessing by remember { mutableStateOf(false) }
 
                                             fun clearCropSource() {
+                                                cropRequestId++
                                                 cropBitmap?.recycle()
                                                 cropBitmap = null
                                                 cropUriText = null
                                                 cropSide = null
                                                 cropRotation = 0
+                                                cropProcessing = false
+                                                error = null
                                                 cropResultBytes = null
                                                 cropResultPreview?.recycle()
                                                 cropResultPreview = null
@@ -489,6 +706,8 @@ private fun WalletRoot(
                                                 cropRequestId++
                                                 cropUriText = uri.toString()
                                                 cropSide = side
+                                                cropProcessing = false
+                                                error = null
                                                 cropRotation = 0
                                                 cropCorners = CropCorners()
                                                 cameraTempName = capturedCameraFile
@@ -498,14 +717,29 @@ private fun WalletRoot(
                                             LaunchedEffect(cropUriText, cropRotation, cropRequestId) {
                                                 val source = cropUriText?.let(Uri::parse) ?: return@LaunchedEffect
                                                 val requestId = cropRequestId
+                                                var decodeError: String? = null
                                                 val decoded = try {
                                                     withContext(Dispatchers.IO) {
-                                                        CardImageProcessor.decode(context, source)
+                                                        CardImageProcessor.decode(
+                                                            context,
+                                                            source,
+                                                            if (cameraTempName != null) "camera" else "gallery"
+                                                        )
                                                     }
                                                 } catch (e: CancellationException) {
                                                     throw e
                                                 } catch (e: Exception) {
-                                                    error = e.message ?: "Could not read selected image."
+                                                    decodeError = when {
+                                                        e is SecurityException ->
+                                                            "Access to this image was denied. Please select it again."
+                                                        e.message == "The selected image is too large to open safely." ->
+                                                            e.message
+                                                        e.message == "The image provider could not open this image." ->
+                                                            e.message
+                                                        e.message == "The selected file is not a supported or readable image." ->
+                                                            e.message
+                                                        else -> "This image could not be opened. Please choose another image."
+                                                    }
                                                     null
                                                 }
                                                 if (requestId != cropRequestId) {
@@ -513,8 +747,9 @@ private fun WalletRoot(
                                                     return@LaunchedEffect
                                                 }
                                                 if (decoded == null) {
-                                                    error = "Could not read selected image."
+                                                    error = decodeError ?: "The selected file is not a supported or readable image."
                                                 } else {
+                                                    error = null
                                                     val rotated = CardImageProcessor.rotateBitmap(decoded, cropRotation)
                                                     cropBitmap?.takeIf { it !== rotated }?.recycle()
                                                     cropBitmap = rotated
@@ -523,6 +758,9 @@ private fun WalletRoot(
 
                                             BackHandler(enabled = cropUriText != null) {
                                                 clearCropSource()
+                                            }
+                                            BackHandler(enabled = cropUriText == null) {
+                                                onCancel()
                                             }
 
                                             LaunchedEffect(existing?.id) {
@@ -794,7 +1032,15 @@ private fun WalletRoot(
                                             var pendingSide by rememberSaveable { mutableStateOf("front") }
                                             val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
                                                 val uri = cameraUriText?.let(Uri::parse)
-                                                if (success && uri != null) {
+                                                val cameraFile = cameraTempName?.let { File(context.cacheDir, it) }
+                                                Log.i(
+                                                    "WalletImageFlow",
+                                                    "Camera callback success=$success outputExists=${cameraFile?.isFile == true} " +
+                                                        "outputHasData=${(cameraFile?.length() ?: 0L) > 0L}"
+                                                )
+                                                if (success && uri != null && cameraFile != null &&
+                                                    cameraFile.isFile && cameraFile.length() > 0L
+                                                ) {
                                                     cropBitmap?.recycle()
                                                     cropBitmap = null
                                                     cropResultPreview?.recycle()
@@ -803,13 +1049,14 @@ private fun WalletRoot(
                                                     cropRequestId++
                                                     cropUriText = uri.toString()
                                                     cropSide = pendingSide
+                                                    error = null
                                                     cropRotation = 0
                                                     cropCorners = CropCorners()
                                                 } else {
                                                     cameraTempName?.let { File(context.cacheDir, it).delete() }
                                                     cameraTempName = null
                                                     cameraUriText = null
-                                                    if (success) error = "Could not open the captured image."
+                                                    if (success) error = "The camera did not create an image. Please try again."
                                                 }
                                             }
                                             val frontGallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -830,16 +1077,18 @@ private fun WalletRoot(
                                             }
 
                                             fun startCamera(side: String) {
+                                                cropRequestId++
                                                 cropBitmap?.recycle()
                                                 cropBitmap = null
+                                                cropProcessing = false
                                                 cropResultBytes = null
                                                 cropResultPreview?.recycle()
                                                 cropResultPreview = null
                                                 cropUriText = null
                                                 cameraTempName?.let { File(context.cacheDir, it).delete() }
                                                 pendingSide = side
-                                                val file = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
                                                 try {
+                                                    val file = File.createTempFile("camera_", ".jpg", context.cacheDir)
                                                     val uri = FileProvider.getUriForFile(
                                                         context, "${context.packageName}.fileprovider", file
                                                     )
@@ -847,29 +1096,41 @@ private fun WalletRoot(
                                                     cameraUriText = uri.toString()
                                                     cameraLauncher.launch(uri)
                                                 } catch (e: Exception) {
-                                                    file.delete()
+                                                    cameraTempName?.let { File(context.cacheDir, it).delete() }
                                                     cameraTempName = null
                                                     cameraUriText = null
-                                                    error = e.message ?: "Could not open the camera."
+                                                    Log.w(
+                                                        "WalletImageFlow",
+                                                        "Camera launch failed: ${e.javaClass.simpleName}: could not create or launch camera output."
+                                                    )
+                                                    error = "Could not open the camera. Please try again."
                                                 }
                                             }
 
                                             fun applyCrop() {
                                                 val sourceUri = cropUriText?.let(Uri::parse) ?: return
                                                 if (cropSide == null) return
+                                                val requestId = cropRequestId
+                                                val rotation = cropRotation
+                                                val corners = cropCorners
+                                                val sourceType = if (cameraTempName != null) "camera" else "gallery"
                                                 cropProcessing = true
                                                 error = null
                                                 scope.launch {
                                                     try {
                                                         val result = withContext(Dispatchers.IO) {
-                                                            val original = CardImageProcessor.decodeFull(context, sourceUri)
+                                                            val original = CardImageProcessor.decodeFull(
+                                                                context,
+                                                                sourceUri,
+                                                                sourceType
+                                                            )
                                                                 ?: throw IllegalStateException("Could not read the original image.")
-                                                            val oriented = CardImageProcessor.rotateBitmap(original, cropRotation)
+                                                            val oriented = CardImageProcessor.rotateBitmap(original, rotation)
                                                             try {
-                                                                require(CardImageProcessor.isValid(cropCorners, oriented.width, oriented.height)) {
+                                                                require(CardImageProcessor.isValid(corners, oriented.width, oriented.height)) {
                                                                     "Crop corners are too close together or form an invalid shape."
                                                                 }
-                                                                val corrected = CardImageProcessor.warp(oriented, cropCorners)
+                                                                val corrected = CardImageProcessor.warp(oriented, corners)
                                                                 try {
                                                                     val stream = ByteArrayOutputStream()
                                                                     check(corrected.compress(Bitmap.CompressFormat.JPEG, 95, stream)) {
@@ -896,14 +1157,28 @@ private fun WalletRoot(
                                                                 oriented.recycle()
                                                             }
                                                         }
+                                                        if (requestId != cropRequestId) {
+                                                            result.second.recycle()
+                                                            return@launch
+                                                        }
                                                         cropResultBytes = result.first
                                                         cropResultPreview = result.second
                                                     } catch (e: CancellationException) {
                                                         throw e
                                                     } catch (e: Exception) {
-                                                        error = e.message ?: "Could not apply the crop."
+                                                        if (requestId == cropRequestId) error = when (e.message) {
+                                                            "The selected image is too large to open safely.",
+                                                            "The image provider could not open this image.",
+                                                            "The selected file is not a supported or readable image.",
+                                                            "Could not read the original image.",
+                                                            "Crop corners are too close together or form an invalid shape.",
+                                                            "Could not compute the perspective crop.",
+                                                            "Could not encode the cropped image.",
+                                                            "Could not create crop preview." -> e.message
+                                                            else -> "Could not process this image. Please try another image."
+                                                        }
                                                     } finally {
-                                                        cropProcessing = false
+                                                        if (requestId == cropRequestId) cropProcessing = false
                                                     }
                                                 }
                                             }
@@ -969,6 +1244,37 @@ private fun WalletRoot(
                                                             cropResultBytes = null
                                                             cropResultPreview?.recycle()
                                                             cropResultPreview = null
+                                                            if (side == "front") {
+                                                                frontGallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                                            } else {
+                                                                backGallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                                            }
+                                                        }) { Text("Choose another image") }
+                                                        TextButton(onClick = ::clearCropSource) { Text("Cancel") }
+                                                    }
+                                                }
+                                                return
+                                            }
+
+                                            if (cropUriText != null && cropSide != null && cropBitmap == null) {
+                                                Column(
+                                                    Modifier.fillMaxSize().padding(24.dp),
+                                                    verticalArrangement = Arrangement.Center,
+                                                    horizontalAlignment = Alignment.CenterHorizontally
+                                                ) {
+                                                    if (error == null) {
+                                                        CircularProgressIndicator()
+                                                        Spacer(Modifier.height(16.dp))
+                                                        Text("Loading image…")
+                                                    } else {
+                                                        Text(error!!, color = MaterialTheme.colorScheme.error)
+                                                        Spacer(Modifier.height(16.dp))
+                                                        Button(onClick = {
+                                                            error = null
+                                                            cropRequestId++
+                                                        }) { Text("Retry") }
+                                                        TextButton(onClick = {
+                                                            val side = cropSide
                                                             if (side == "front") {
                                                                 frontGallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                                                             } else {
@@ -1101,6 +1407,8 @@ private fun WalletRoot(
                                                                         var deleteConfirm by remember { mutableStateOf(false) }
                                                                         val rotation by animateFloatAsState(if (isBack) 180f else 0f, label = "cardFlip")
 
+                                                                        BackHandler(onBack = onBack)
+
                                                                         LaunchedEffect(document.id) {
                                                                             try {
                                                                                 val images = withContext(Dispatchers.IO) {
@@ -1205,14 +1513,14 @@ private fun WalletRoot(
                                                                         private fun AccountScreen(account: AccountEntity?, repository: WalletRepository) {
                                                                             val context = LocalContext.current
                                                                             val scope = rememberCoroutineScope()
-                                                                            var editing by remember { mutableStateOf(false) }
-                                                                            var deleteConfirm by remember { mutableStateOf(false) }
-                                                                            var name by remember(account) { mutableStateOf(account?.name ?: "") }
-                                                                            var age by remember(account) { mutableStateOf(account?.age?.toString() ?: "") }
-                                                                            var mobile by remember(account) { mutableStateOf(account?.mobile ?: "") }
-                                                                            var profileBytes by remember(account) { mutableStateOf<ByteArray?>(null) }
-                                                                            var removeProfile by remember(account) { mutableStateOf(false) }
-                                                                            var error by remember { mutableStateOf<String?>(null) }
+                                                                            var editing by rememberSaveable { mutableStateOf(false) }
+                                                                            var deleteConfirm by rememberSaveable { mutableStateOf(false) }
+                                                                            var name by rememberSaveable(account) { mutableStateOf(account?.name ?: "") }
+                                                                            var age by rememberSaveable(account) { mutableStateOf(account?.age?.toString() ?: "") }
+                                                                            var mobile by rememberSaveable(account) { mutableStateOf(account?.mobile ?: "") }
+                                                                            var profileBytes by rememberSaveable(account) { mutableStateOf<ByteArray?>(null) }
+                                                                            var removeProfile by rememberSaveable(account) { mutableStateOf(false) }
+                                                                            var error by rememberSaveable { mutableStateOf<String?>(null) }
 
                                                                             LaunchedEffect(account?.profileFile) {
                                                                                 try {
@@ -1235,7 +1543,7 @@ private fun WalletRoot(
                                                                                         var scaled: Bitmap? = null
                                                                                         try {
                                                                                             val sourceBitmap = withContext(Dispatchers.IO) {
-                                                                                                CardImageProcessor.decode(context, uri)
+                                                                                                CardImageProcessor.decode(context, uri, "profile-gallery")
                                                                                             } ?: throw IllegalStateException("Could not read profile image.")
                                                                                             bitmap = sourceBitmap
                                                                                             val scale = minOf(
@@ -1263,7 +1571,11 @@ private fun WalletRoot(
                                                                                         } catch (e: CancellationException) {
                                                                                             throw e
                                                                                         } catch (e: Exception) {
-                                                                                            error = e.message ?: "Could not read profile image."
+                                                                                            error = if (e is SecurityException) {
+                                                                                                "Access to this image was denied. Please select it again."
+                                                                                            } else {
+                                                                                                "This profile image could not be opened. Please choose another image."
+                                                                                            }
                                                                                         } finally {
                                                                                             scaled?.recycle()
                                                                                             bitmap?.recycle()
@@ -1320,7 +1632,7 @@ private fun WalletRoot(
                                                                             } else {
                                                                                 Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)) {
                                                                                     Spacer(Modifier.height(18.dp))
-                                                                                    Text("Account", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                                                                                    Text("Profile", fontSize = 27.sp, fontWeight = FontWeight.Bold)
                                                                                     Spacer(Modifier.height(24.dp))
                                                                                     ProfileAvatar(profileBytes)
                                                                                     Spacer(Modifier.height(16.dp))
@@ -1361,6 +1673,219 @@ private fun WalletRoot(
                                                                             }
                                                                         }
 
+                                                                        @Composable
+                                                                        private fun SettingsScreen(
+                                                                            themeMode: String,
+                                                                            onThemeModeChange: (String) -> Unit,
+                                                                            pinManager: PinManager
+                                                                        ) {
+                                                                            val scope = rememberCoroutineScope()
+                                                                            var showPinDialog by rememberSaveable { mutableStateOf(false) }
+                                                                            var currentPin by remember { mutableStateOf("") }
+                                                                            var newPin by remember { mutableStateOf("") }
+                                                                            var confirmPin by remember { mutableStateOf("") }
+                                                                            var pinMessage by remember { mutableStateOf<String?>(null) }
+                                                                            var showHelp by rememberSaveable { mutableStateOf(false) }
+                                                                            var pinSaving by remember { mutableStateOf(false) }
+
+                                                                            Column(
+                                                                                Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp)
+                                                                            ) {
+                                                                                Spacer(Modifier.height(8.dp))
+                                                                                Text("Settings", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                                                                                Spacer(Modifier.height(18.dp))
+                                                                                SettingsSection("Appearance") {
+                                                                                    listOf(
+                                                                                        "light" to "Light mode",
+                                                                                        "dark" to "Dark mode",
+                                                                                        "system" to "System default"
+                                                                                    ).forEach { (value, label) ->
+                                                                                        Row(
+                                                                                            Modifier.fillMaxWidth().clickable { onThemeModeChange(value) },
+                                                                                            verticalAlignment = Alignment.CenterVertically
+                                                                                        ) {
+                                                                                            RadioButton(
+                                                                                                selected = themeMode == value,
+                                                                                                onClick = { onThemeModeChange(value) }
+                                                                                            )
+                                                                                            Text(label)
+                                                                                        }
+                                                                                    }
+                                                                                }
+                                                                                SettingsSection("Security") {
+                                                                                    SettingsAction("Change PIN", "Update the PIN used to unlock this wallet.") {
+                                                                                        pinMessage = null
+                                                                                        showPinDialog = true
+                                                                                    }
+                                                                                    HorizontalDivider()
+                                                                                    Text("Fingerprint authentication — Not available in this version.",
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                                        modifier = Modifier.padding(vertical = 10.dp))
+                                                                                    Text("Automatic app lock — Not available in this version.",
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                                        modifier = Modifier.padding(vertical = 10.dp))
+                                                                                    Text("Your saved documents remain encrypted in private app storage. No cloud upload is used.",
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                                                }
+                                                                                SettingsSection("Language") {
+                                                                                    Text("English (current)")
+                                                                                    Text("Tamil and Hindi are not available in this version.",
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                                                }
+                                                                                SettingsSection("Backup") {
+                                                                                    Text("Encrypted local backup and restore are not available in this version. No data will be exported or overwritten.",
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                                                }
+                                                                                SettingsSection("Support") {
+                                                                                    SettingsAction("Help and FAQ", "Using your offline wallet") {
+                                                                                        showHelp = true
+                                                                                    }
+                                                                                    HorizontalDivider()
+                                                                                    Text("Contact support — Not configured.",
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                                        modifier = Modifier.padding(vertical = 10.dp))
+                                                                                    Text("Send feedback — Not configured.",
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                                        modifier = Modifier.padding(vertical = 10.dp))
+                                                                                    Text("Privacy policy and terms — Not available in this version.",
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                                        modifier = Modifier.padding(vertical = 10.dp))
+                                                                                    Text("App version ${com.myid.wallet.BuildConfig.VERSION_NAME}",
+                                                                                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                                                }
+                                                                                pinMessage?.let {
+                                                                                    Text(it, color = MaterialTheme.colorScheme.primary,
+                                                                                        modifier = Modifier.padding(vertical = 8.dp))
+                                                                                }
+                                                                            }
+
+                                                                            if (showPinDialog) {
+                                                                                AlertDialog(
+                                                                                    onDismissRequest = {
+                                                                                        if (!pinSaving) showPinDialog = false
+                                                                                    },
+                                                                                    title = { Text("Change PIN") },
+                                                                                    text = {
+                                                                                        Column {
+                                                                                            OutlinedTextField(
+                                                                                                currentPin,
+                                                                                                { currentPin = it.filter { char -> char.isDigit() }.take(12) },
+                                                                                                label = { Text("Current PIN") },
+                                                                                                visualTransformation = PasswordVisualTransformation(),
+                                                                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                                                                                                singleLine = true
+                                                                                            )
+                                                                                            Spacer(Modifier.height(8.dp))
+                                                                                            OutlinedTextField(
+                                                                                                newPin,
+                                                                                                { newPin = it.filter { char -> char.isDigit() }.take(12) },
+                                                                                                label = { Text("New PIN (at least 8 digits)") },
+                                                                                                visualTransformation = PasswordVisualTransformation(),
+                                                                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                                                                                                singleLine = true
+                                                                                            )
+                                                                                            Spacer(Modifier.height(8.dp))
+                                                                                            OutlinedTextField(
+                                                                                                confirmPin,
+                                                                                                { confirmPin = it.filter { char -> char.isDigit() }.take(12) },
+                                                                                                label = { Text("Confirm new PIN") },
+                                                                                                visualTransformation = PasswordVisualTransformation(),
+                                                                                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword),
+                                                                                                singleLine = true
+                                                                                            )
+                                                                                            pinMessage?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                                                                                        }
+                                                                                    },
+                                                                                    confirmButton = {
+                                                                                        TextButton(
+                                                                                            enabled = !pinSaving,
+                                                                                            onClick = {
+                                                                                                if (newPin.length < 8) {
+                                                                                                    pinMessage = "Use at least 8 digits."
+                                                                                                } else if (newPin != confirmPin) {
+                                                                                                    pinMessage = "New PINs do not match."
+                                                                                                } else {
+                                                                                                    pinSaving = true
+                                                                                                    pinMessage = null
+                                                                                                    scope.launch {
+                                                                                                        try {
+                                                                                                            val changed = withContext(Dispatchers.IO) {
+                                                                                                                if (!pinManager.verify(currentPin)) false
+                                                                                                                else pinManager.create(newPin)
+                                                                                                            }
+                                                                                                            if (changed) {
+                                                                                                                showPinDialog = false
+                                                                                                                pinMessage = "PIN changed."
+                                                                                                                currentPin = ""
+                                                                                                                newPin = ""
+                                                                                                                confirmPin = ""
+                                                                                                            } else {
+                                                                                                                pinMessage = "Current PIN is incorrect."
+                                                                                                            }
+                                                                                                        } catch (e: CancellationException) {
+                                                                                                            throw e
+                                                                                                        } catch (_: Exception) {
+                                                                                                            pinMessage = "Could not change the PIN. Please try again."
+                                                                                                        } finally {
+                                                                                                            pinSaving = false
+                                                                                                        }
+                                                                                                    }
+                                                                                                }
+                                                                                            }
+                                                                                        ) { Text(if (pinSaving) "Saving…" else "Change PIN") }
+                                                                                    },
+                                                                                    dismissButton = {
+                                                                                        TextButton(
+                                                                                            enabled = !pinSaving,
+                                                                                            onClick = {
+                                                                                                showPinDialog = false
+                                                                                                pinMessage = null
+                                                                                                currentPin = ""
+                                                                                                newPin = ""
+                                                                                                confirmPin = ""
+                                                                                            }
+                                                                                        ) { Text("Cancel") }
+                                                                                    }
+                                                                                )
+                                                                            }
+                                                                            if (showHelp) {
+                                                                                AlertDialog(
+                                                                                    onDismissRequest = { showHelp = false },
+                                                                                    title = { Text("Help and FAQ") },
+                                                                                    text = {
+                                                                                        Text("Add documents from the Home tab using your camera or gallery. Search works on this device. Favourite status is saved with the document metadata. Images are encrypted in private app storage; deleting your profile does not delete documents.")
+                                                                                    },
+                                                                                    confirmButton = {
+                                                                                        TextButton(onClick = { showHelp = false }) { Text("Close") }
+                                                                                    }
+                                                                                )
+                                                                            }
+                                                                        }
+
+                                                                        @Composable
+                                                                        private fun SettingsSection(title: String, content: @Composable ColumnScope.() -> Unit) {
+                                                                            Column(Modifier.fillMaxWidth().padding(bottom = 14.dp)) {
+                                                                                Text(title, fontWeight = FontWeight.SemiBold)
+                                                                                Spacer(Modifier.height(8.dp))
+                                                                                Card(
+                                                                                    Modifier.fillMaxWidth(),
+                                                                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                                                                                ) {
+                                                                                    Column(Modifier.padding(16.dp), content = content)
+                                                                                }
+                                                                            }
+                                                                        }
+
+                                                                        @Composable
+                                                                        private fun SettingsAction(title: String, subtitle: String, onClick: () -> Unit) {
+                                                                            TextButton(onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+                                                                                Column(Modifier.fillMaxWidth()) {
+                                                                                    Text(title, color = MaterialTheme.colorScheme.onSurface)
+                                                                                    Text(subtitle, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                                                }
+                                                                            }
+                                                                        }
+
                                                                         private fun categoryFrameColor(category: String): Color = when {
                                                                             category.contains("Aadhaar", ignoreCase = true) -> Color(0xCC1D4ED8)
                                                                             category.contains("PAN", ignoreCase = true) -> Color(0xCC102A43)
@@ -1389,6 +1914,8 @@ private fun WalletRoot(
                                                                                 var back by remember(document.id) { mutableStateOf<ByteArray?>(null) }
                                                                                 var error by remember(document.id) { mutableStateOf<String?>(null) }
                                                                                 val rotation by animateFloatAsState(if (isBack) 180f else 0f, label = "quickShowFlip")
+
+                                                                                    BackHandler(onBack = onExit)
 
                                                                                 LaunchedEffect(document.id) {
                                                                                     try {

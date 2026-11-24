@@ -5,6 +5,7 @@ Native Android starter project for an offline-first identity-card wallet.
 ## Included in this project
 
 - Kotlin + Jetpack Compose UI
+- Five local navigation sections: Home, Search, Favourites, Profile, and Settings
 - Room / SQLite document metadata database
 - Android Keystore-backed AES-256-GCM file encryption
 - PIN setup and unlock gate (PBKDF2-HMAC-SHA256 verifier)
@@ -12,10 +13,11 @@ Native Android starter project for an offline-first identity-card wallet.
 - Encrypted private app file storage
 - Swipeable document collection
 - 3D front/back card flip
-- Favourite cards
+- Persistent favourite cards and local document-name/type search
+- Profile details and profile photo management
 - Save a selected card as a PDF
 - Share selected front/back/both sides using Android Sharesheet
-- Light/dark/system theme setting
+- Persistent light/dark/system theme setting and PIN change
 
 ## Important security and product limitations
 
@@ -26,7 +28,8 @@ This is a functional starter/MVP, not a certified identity wallet or a completed
 - PDF exports and files shared to other apps leave the encrypted storage boundary. The receiving app or recipient may retain copies.
 - Government document images are stored as user-provided scans. This app does not verify their authenticity and is not a government service.
 - Before publishing, add automated tests, robust rate limiting, security review, accessibility review, document redaction, temporary-file lifecycle handling, and verify Android backup exclusion on target devices.
-- No cloud backup or network upload is implemented.
+- No local or cloud backup, fingerprint authentication, automatic app lock, Tamil/Hindi translation, or configured support/policy links are implemented.
+- The app does not upload documents or profile images to cloud storage.
 
 ## Open and run
 

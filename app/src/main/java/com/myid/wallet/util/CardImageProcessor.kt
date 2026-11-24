@@ -1,6 +1,7 @@
 package com.myid.wallet.util
 
 import android.content.Context
+import android.graphics.ImageDecoder
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
@@ -8,7 +9,10 @@ import android.graphics.Matrix
 import android.graphics.Paint
 import android.media.ExifInterface
 import android.net.Uri
+import android.os.Build
+import android.util.Log
 import java.io.File
+import java.io.IOException
 import kotlin.math.abs
 import kotlin.math.min
 
@@ -30,37 +34,91 @@ data class CropCorners(
 }
 
 object CardImageProcessor {
-    fun decode(context: Context, uri: Uri): Bitmap? {
-        return decodeUri(context, uri, maxSide = 1600)
+    private const val TAG = "CardImageProcessor"
+    private const val MAX_SOURCE_BYTES = 100L * 1024 * 1024
+
+    fun decode(context: Context, uri: Uri, sourceType: String = "image"): Bitmap? {
+        return decodeUri(context, uri, maxSide = 1600, sourceType = sourceType)
     }
 
     fun decodeFile(file: File): Bitmap? {
+        return decodeFile(file, maxSide = 2400)
+    }
+
+    private fun decodeFile(file: File, maxSide: Int): Bitmap? {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val source = ImageDecoder.createSource(file)
+            return ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+                val size = info.size
+                val scale = min(1f, maxSide.toFloat() / maxOf(size.width, size.height))
+                if (scale < 1f) {
+                    decoder.setTargetSize(
+                        (size.width * scale).toInt().coerceAtLeast(1),
+                        (size.height * scale).toInt().coerceAtLeast(1)
+                    )
+                }
+                decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+            }
+        }
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.absolutePath, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
         val options = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, 1600)
+            inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, maxSide)
         }
         val bitmap = BitmapFactory.decodeFile(file.absolutePath, options) ?: return null
-        return applyExifOrientation(bitmap, ExifInterface(file.absolutePath))
+        val exif = try {
+            ExifInterface(file.absolutePath)
+        } catch (e: IOException) {
+            Log.w(TAG, "EXIF metadata unavailable: ${e.javaClass.simpleName}: using default orientation.")
+            null
+        }
+        return exif?.let { applyExifOrientation(bitmap, it) } ?: bitmap
     }
 
-    fun decodeFull(context: Context, uri: Uri): Bitmap? =
-        decodeUri(context, uri, maxSide = null)
+    fun decodeFull(context: Context, uri: Uri, sourceType: String = "image"): Bitmap? =
+        decodeUri(context, uri, maxSide = 2400, sourceType = sourceType)
 
-    private fun decodeUri(context: Context, uri: Uri, maxSide: Int?): Bitmap? {
+    private fun decodeUri(context: Context, uri: Uri, maxSide: Int, sourceType: String): Bitmap? {
         val resolver = context.contentResolver
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = maxSide?.let { sampleSize(bounds.outWidth, bounds.outHeight, it) } ?: 1
-            inPreferredConfig = Bitmap.Config.ARGB_8888
+        val scheme = uri.scheme ?: "unknown"
+        val mimeType = try {
+            resolver.getType(uri) ?: "unknown"
+        } catch (_: Exception) {
+            "unknown"
         }
-        val bitmap = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) } ?: return null
-        val exif = resolver.openInputStream(uri)?.use { ExifInterface(it) }
-        return if (exif == null) bitmap else applyExifOrientation(bitmap, exif)
+        val cachedSource = File.createTempFile("myid_image_", ".tmp", context.cacheDir)
+        try {
+            resolver.openInputStream(uri)?.use { input ->
+                cachedSource.outputStream().buffered().use { output ->
+                    val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                    var totalBytes = 0L
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        totalBytes += count
+                        if (totalBytes > MAX_SOURCE_BYTES) {
+                            throw IOException("The selected image is too large to open safely.")
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                }
+            } ?: throw IOException("The image provider could not open this image.")
+
+            val bitmap = decodeFile(cachedSource, maxSide)
+                ?: throw IOException("The selected file is not a supported or readable image.")
+            Log.i(TAG, "Image decode succeeded: source=$sourceType scheme=$scheme mime=$mimeType")
+            return bitmap
+        } catch (e: Exception) {
+            Log.w(
+                TAG,
+                "Image decode failed: source=$sourceType scheme=$scheme mime=$mimeType " +
+                    "exception=${e.javaClass.simpleName}: image stream could not be read or decoded."
+            )
+            throw e
+        } finally {
+            cachedSource.delete()
+        }
     }
 
     private fun sampleSize(width: Int, height: Int, maxSide: Int): Int {
