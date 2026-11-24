@@ -27,41 +27,52 @@ class WalletRepository(
     ) = withContext(Dispatchers.IO) {
         val id = existing?.id ?: UUID.randomUUID().toString()
         val directory = File(context.filesDir, "vault").apply { mkdirs() }
+        val newFiles = mutableListOf<File>()
 
         fun writeSide(side: String, bytes: ByteArray): String {
-            val fileName = "${id}_${side}_${System.currentTimeMillis()}.enc"
-            File(directory, fileName).writeBytes(crypto.encrypt(bytes))
+            val fileName = "${id}_${side}_${UUID.randomUUID()}.enc"
+            val file = File(directory, fileName)
+            newFiles += file
+            java.io.FileOutputStream(file).use { output ->
+                output.write(crypto.encrypt(bytes))
+                output.fd.sync()
+            }
             return fileName
         }
 
-        val frontName = writeSide("front", frontBytes)
-        val backName = when {
-            backBytes != null -> writeSide("back", backBytes)
-            removeBack -> null
-            else -> existing?.backFile
+        val entity = try {
+            val frontName = writeSide("front", frontBytes)
+            val backName = when {
+                backBytes != null -> writeSide("back", backBytes)
+                removeBack -> null
+                else -> existing?.backFile
+            }
+
+            val entity = (existing ?: DocumentEntity(
+                id = id,
+                title = title.ifBlank { category },
+                category = category,
+                frontFile = frontName,
+                backFile = backName
+            )).copy(
+                title = title.ifBlank { category },
+                category = category,
+                frontFile = frontName,
+                backFile = backName
+            )
+            dao.upsert(entity)
+            entity
+        } catch (e: Exception) {
+            newFiles.forEach { it.delete() }
+            throw e
         }
 
-        existing?.let {
-            if (it.frontFile.isNotBlank()) File(directory, it.frontFile).delete()
+        val retained = setOfNotNull(entity.frontFile, entity.backFile)
+        existing?.let { old ->
+            listOfNotNull(old.frontFile.takeIf { it.isNotBlank() }, old.backFile)
+                .filterNot(retained::contains)
+                .forEach { File(directory, it).delete() }
         }
-        backBytes?.let {
-            existing?.backFile?.let { old -> File(directory, old).delete() }
-        }
-        if (removeBack) existing?.backFile?.let { File(directory, it).delete() }
-
-        val entity = (existing ?: DocumentEntity(
-            id = id,
-            title = title.ifBlank { category },
-            category = category,
-            frontFile = frontName,
-            backFile = backName
-        )).copy(
-            title = title.ifBlank { category },
-            category = category,
-            frontFile = frontName,
-            backFile = backName
-        )
-        dao.upsert(entity)
         entity
     }
 
@@ -122,8 +133,8 @@ class WalletRepository(
     }
 
     suspend fun removeBack(document: DocumentEntity) = withContext(Dispatchers.IO) {
-        document.backFile?.let { File(File(context.filesDir, "vault"), it).delete() }
         dao.upsert(document.copy(backFile = null))
+        document.backFile?.let { File(File(context.filesDir, "vault"), it).delete() }
     }
 
     suspend fun updateMetadata(document: DocumentEntity, number: String?, name: String?, dob: String?, expiry: String?) =
