@@ -16,14 +16,13 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.pager.HorizontalPager
-import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Edit
@@ -249,7 +249,6 @@ private fun WalletRoot(
                         }
                     }
 
-                    @OptIn(ExperimentalFoundationApi::class)
                     @Composable
                     private fun HomeScreen(
                         documents: List<DocumentEntity>,
@@ -270,7 +269,7 @@ private fun WalletRoot(
                             }
                             Spacer(Modifier.height(18.dp))
                             if (documents.isEmpty()) {
-                                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                         Icon(Icons.Default.Add, null, tint = Color(0xFF3B82F6), modifier = Modifier.size(64.dp))
                                         Spacer(Modifier.height(12.dp))
@@ -283,25 +282,50 @@ private fun WalletRoot(
                                 Text("${documents.size} saved ${if (documents.size == 1) "card" else "cards"}",
                                     fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Spacer(Modifier.height(12.dp))
-                                val pager = rememberPagerState(pageCount = { documents.size })
-                                HorizontalPager(state = pager, modifier = Modifier.fillMaxWidth().height(280.dp),
-                                    pageSpacing = 14.dp) { page ->
-                                    val doc = documents[page]
-                                    Card(
-                                        modifier = Modifier.fillMaxSize().padding(vertical = 6.dp).clickable { onOpen(doc) },
-                                        shape = RoundedCornerShape(24.dp),
-                                        elevation = CardDefaults.cardElevation(8.dp),
-                                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-                                    ) {
-                                        Box(Modifier.fillMaxSize()) {
-                                            EncryptedImage(repository, doc.frontFile)
-                                            Surface(
-                                                modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
-                                                shape = RoundedCornerShape(12.dp),
-                                                color = categoryFrameColor(doc.category)
+                                LazyColumn(
+                                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                                    contentPadding = PaddingValues(bottom = 16.dp)
+                                ) {
+                                    items(documents, key = { it.id }) { doc ->
+                                        Card(
+                                            modifier = Modifier.fillMaxWidth().clickable { onOpen(doc) },
+                                            shape = RoundedCornerShape(18.dp),
+                                            elevation = CardDefaults.cardElevation(2.dp),
+                                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.fillMaxWidth().height(112.dp),
+                                                verticalAlignment = Alignment.CenterVertically
                                             ) {
-                                                Text(doc.category, Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
-                                                    color = Color.White, fontSize = 13.sp)
+                                                Box(Modifier.width(112.dp).fillMaxHeight()) {
+                                                    EncryptedImage(repository, doc.frontFile)
+                                                }
+                                                Column(
+                                                    modifier = Modifier.weight(1f).padding(horizontal = 16.dp, vertical = 12.dp),
+                                                    verticalArrangement = Arrangement.Center
+                                                ) {
+                                                    Text(
+                                                        text = doc.title.ifBlank { doc.category },
+                                                        fontSize = 16.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        color = MaterialTheme.colorScheme.onSurface
+                                                    )
+                                                    if (doc.title.isNotBlank() && doc.title != doc.category) {
+                                                        Spacer(Modifier.height(4.dp))
+                                                        Text(
+                                                            doc.category,
+                                                            fontSize = 13.sp,
+                                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
+                                                }
+                                                Icon(
+                                                    Icons.Default.ChevronRight,
+                                                    contentDescription = "Open ${doc.title.ifBlank { doc.category }}",
+                                                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                                                    modifier = Modifier.padding(end = 14.dp).size(22.dp)
+                                                )
                                             }
                                         }
                                     }
