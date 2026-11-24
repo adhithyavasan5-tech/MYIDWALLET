@@ -4,22 +4,19 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
-import android.graphics.ColorMatrix
-import android.graphics.ColorMatrixColorFilter
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.media.ExifInterface
 import android.net.Uri
 import java.io.File
 import kotlin.math.abs
-import kotlin.math.max
 import kotlin.math.min
 
 data class CropCorners(
-    var topLeft: android.graphics.PointF = android.graphics.PointF(.08f, .18f),
-    var topRight: android.graphics.PointF = android.graphics.PointF(.92f, .18f),
-    var bottomRight: android.graphics.PointF = android.graphics.PointF(.92f, .82f),
-    var bottomLeft: android.graphics.PointF = android.graphics.PointF(.08f, .82f)
+    val topLeft: android.graphics.PointF = android.graphics.PointF(.08f, .18f),
+    val topRight: android.graphics.PointF = android.graphics.PointF(.92f, .18f),
+    val bottomRight: android.graphics.PointF = android.graphics.PointF(.92f, .82f),
+    val bottomLeft: android.graphics.PointF = android.graphics.PointF(.08f, .82f)
 ) {
     fun confidence(bitmap: Bitmap): Float {
         val span = maxOf(
@@ -34,189 +31,202 @@ data class CropCorners(
 
 object CardImageProcessor {
     fun decode(context: Context, uri: Uri): Bitmap? {
-        val bytes = context.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: return null
-        val sampled = decodeSampled(bytes)
-        val orientation = context.contentResolver.openInputStream(uri)?.use {
-            exifRotationDegrees(ExifInterface(it))
-        } ?: 0
-        return rotate(sampled, orientation)
+        return decodeUri(context, uri, maxSide = 1600)
     }
 
     fun decodeFile(file: File): Bitmap? {
-        val bytes = file.readBytes()
-        val sampled = decodeSampled(bytes)
-        val orientation = exifRotationDegrees(ExifInterface(file.absolutePath))
-        return rotate(sampled, orientation)
-    }
-
-    private fun exifRotationDegrees(exif: ExifInterface): Int =
-        when (exif.getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_UNDEFINED)) {
-            ExifInterface.ORIENTATION_ROTATE_90 -> 90
-            ExifInterface.ORIENTATION_ROTATE_180 -> 180
-            ExifInterface.ORIENTATION_ROTATE_270 -> 270
-            else -> 0
-        }
-
-    private fun decodeSampled(bytes: ByteArray): Bitmap {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-        val maxSide = 1600
-        var scale = 1
-        while (bounds.outWidth / scale > maxSide || bounds.outHeight / scale > maxSide) scale *= 2
-        val options = BitmapFactory.Options().apply { inSampleSize = scale }
-        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size, options)
-            ?: error("Could not decode selected image.")
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = sampleSize(bounds.outWidth, bounds.outHeight, 1600)
+        }
+        val bitmap = BitmapFactory.decodeFile(file.absolutePath, options) ?: return null
+        return applyExifOrientation(bitmap, ExifInterface(file.absolutePath))
     }
 
-    private fun rotate(bitmap: Bitmap, degrees: Int): Bitmap {
-        if (degrees == 0) return bitmap
-        val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+    fun decodeFull(context: Context, uri: Uri): Bitmap? =
+        decodeUri(context, uri, maxSide = null)
+
+    private fun decodeUri(context: Context, uri: Uri, maxSide: Int?): Bitmap? {
+        val resolver = context.contentResolver
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) } ?: return null
+        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+        val options = BitmapFactory.Options().apply {
+            inSampleSize = maxSide?.let { sampleSize(bounds.outWidth, bounds.outHeight, it) } ?: 1
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+        val bitmap = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, options) } ?: return null
+        val exif = resolver.openInputStream(uri)?.use { ExifInterface(it) }
+        return if (exif == null) bitmap else applyExifOrientation(bitmap, exif)
+    }
+
+    private fun sampleSize(width: Int, height: Int, maxSide: Int): Int {
+        var sample = 1
+        while (width / sample > maxSide || height / sample > maxSide) sample *= 2
+        return sample
+    }
+
+    private fun applyExifOrientation(bitmap: Bitmap, exif: ExifInterface): Bitmap {
+        val orientation = exif.getAttributeInt(
+            ExifInterface.TAG_ORIENTATION,
+            ExifInterface.ORIENTATION_NORMAL
+        )
+        val matrix = Matrix()
+        val values = when (orientation) {
+            ExifInterface.ORIENTATION_FLIP_HORIZONTAL ->
+                floatArrayOf(-1f, 0f, bitmap.width.toFloat(), 0f, 1f, 0f, 0f, 0f, 1f)
+            ExifInterface.ORIENTATION_ROTATE_180 ->
+                floatArrayOf(-1f, 0f, bitmap.width.toFloat(), 0f, -1f, bitmap.height.toFloat(), 0f, 0f, 1f)
+            ExifInterface.ORIENTATION_FLIP_VERTICAL ->
+                floatArrayOf(1f, 0f, 0f, 0f, -1f, bitmap.height.toFloat(), 0f, 0f, 1f)
+            ExifInterface.ORIENTATION_TRANSPOSE ->
+                floatArrayOf(0f, 1f, 0f, 1f, 0f, 0f, 0f, 0f, 1f)
+            ExifInterface.ORIENTATION_ROTATE_90 ->
+                floatArrayOf(0f, -1f, bitmap.height.toFloat(), 1f, 0f, 0f, 0f, 0f, 1f)
+            ExifInterface.ORIENTATION_TRANSVERSE ->
+                floatArrayOf(0f, -1f, bitmap.height.toFloat(), -1f, 0f, bitmap.width.toFloat(), 0f, 0f, 1f)
+            ExifInterface.ORIENTATION_ROTATE_270 ->
+                floatArrayOf(0f, 1f, 0f, -1f, 0f, bitmap.width.toFloat(), 0f, 0f, 1f)
+            else -> return bitmap
+        }
+        matrix.setValues(values)
+        return transformed(bitmap, matrix)
+    }
+
+    private fun transformed(bitmap: Bitmap, matrix: Matrix): Bitmap {
         val result = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true)
         if (result !== bitmap) bitmap.recycle()
         return result
     }
 
-    fun detectCorners(bitmap: Bitmap): CropCorners {
-        val edgeBitmap = toGrayscale(bitmap)
-        val w = edgeBitmap.width
-        val h = edgeBitmap.height
-        val pixels = IntArray(w * h)
-        edgeBitmap.getPixels(pixels, 0, w, 0, 0, w, h)
-        val rowScores = FloatArray(h)
-        val colScores = FloatArray(w)
-        val threshold = 34
-        for (y in 2 until h - 2) {
-            var score = 0f
-            for (x in 2 until w - 2) {
-                val c = android.graphics.Color.red(pixels[y * w + x])
-                val right = android.graphics.Color.red(pixels[y * w + x + 2])
-                val down = android.graphics.Color.red(pixels[(y + 2) * w + x])
-                val gx = abs(c - right)
-                val gy = abs(c - down)
-                val edge = gx + gy
-                if (edge > threshold) {
-                    score += edge
-                    colScores[x] += edge
-                }
-            }
-            rowScores[y] = score
-        }
-        edgeBitmap.recycle()
-
-        val marginX = (w * .05f).toInt()
-        val marginY = (h * .05f).toInt()
-        fun peak(values: FloatArray, from: Int, to: Int): Int {
-            var best = from
-            for (i in from until to) if (values[i] > values[best]) best = i
-            return best
-        }
-        val top = peak(rowScores, marginY, h / 2)
-        val bottom = peak(rowScores, h / 2, h - marginY)
-        val left = peak(colScores, marginX, w / 2)
-        val right = peak(colScores, w / 2, w - marginX)
-        val x1 = (left.toFloat() / w).coerceIn(.03f, .35f)
-        val x2 = (right.toFloat() / w).coerceIn(.65f, .97f)
-        val y1 = (top.toFloat() / h).coerceIn(.03f, .35f)
-        val y2 = (bottom.toFloat() / h).coerceIn(.65f, .97f)
-        val area = (x2 - x1) * (y2 - y1)
-        if (area < .18f) return CropCorners()
-        return CropCorners(
-            android.graphics.PointF(x1, y1),
-            android.graphics.PointF(x2, y1),
-            android.graphics.PointF(x2, y2),
-            android.graphics.PointF(x1, y2)
-        )
+    fun rotateBitmap(bitmap: Bitmap, degrees: Int): Bitmap {
+        if (degrees % 360 == 0) return bitmap
+        val matrix = Matrix().apply { postRotate(degrees.toFloat()) }
+        return transformed(bitmap, matrix)
     }
 
-    private fun toGrayscale(source: Bitmap): Bitmap {
-        val small = if (source.width > 600 || source.height > 600) {
-            val scale = 600f / max(source.width, source.height)
-            Bitmap.createScaledBitmap(source, (source.width * scale).toInt(), (source.height * scale).toInt(), true)
-        } else source
-        val gray = Bitmap.createBitmap(small.width, small.height, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(gray)
-        val paint = Paint()
-        val matrix = ColorMatrix().apply { setSaturation(0f) }
-        paint.colorFilter = ColorMatrixColorFilter(matrix)
-        canvas.drawBitmap(small, 0f, 0f, paint)
-        if (small !== source) small.recycle()
-        return gray
+    fun rotateCorners(corners: CropCorners, degrees: Int): CropCorners {
+        val turns = ((degrees / 90) % 4 + 4) % 4
+        var result = corners
+        repeat(turns) {
+            fun clockwise(point: android.graphics.PointF) =
+                android.graphics.PointF(1f - point.y, point.x)
+            result = CropCorners(
+                topLeft = clockwise(result.bottomLeft),
+                topRight = clockwise(result.topLeft),
+                bottomRight = clockwise(result.topRight),
+                bottomLeft = clockwise(result.bottomRight)
+            )
+        }
+        return result
+    }
+
+    fun imageToViewMatrix(
+        imageWidth: Int,
+        imageHeight: Int,
+        viewWidth: Float,
+        viewHeight: Float,
+        zoom: Float,
+        pan: android.graphics.PointF
+    ): Matrix {
+        val scale = min(viewWidth / imageWidth, viewHeight / imageHeight) * zoom
+        val matrix = Matrix()
+        matrix.setScale(scale, scale)
+        matrix.postTranslate(
+            (viewWidth - imageWidth * scale) / 2f + pan.x,
+            (viewHeight - imageHeight * scale) / 2f + pan.y
+        )
+        return matrix
+    }
+
+    fun viewToImagePoint(matrix: Matrix, x: Float, y: Float): android.graphics.PointF? {
+        val inverse = Matrix()
+        if (!matrix.invert(inverse)) return null
+        val point = floatArrayOf(x, y)
+        inverse.mapPoints(point)
+        return android.graphics.PointF(point[0], point[1])
+    }
+
+    fun moveCorner(
+        corners: CropCorners,
+        index: Int,
+        x: Float,
+        y: Float,
+        imageWidth: Int,
+        imageHeight: Int
+    ): CropCorners? {
+        val point = android.graphics.PointF(x.coerceIn(0f, 1f), y.coerceIn(0f, 1f))
+        val moved = when (index) {
+            0 -> corners.copy(topLeft = point)
+            1 -> corners.copy(topRight = point)
+            2 -> corners.copy(bottomRight = point)
+            3 -> corners.copy(bottomLeft = point)
+            else -> return null
+        }
+        return moved.takeIf { isValid(it, imageWidth, imageHeight) }
+    }
+
+    fun isValid(corners: CropCorners, imageWidth: Int, imageHeight: Int): Boolean {
+        val points = listOf(corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft)
+        if (points.any { it.x !in 0f..1f || it.y !in 0f..1f }) return false
+        val pixelPoints = points.map { android.graphics.PointF(it.x * imageWidth, it.y * imageHeight) }
+        val crossProducts = pixelPoints.indices.map { index ->
+            val a = pixelPoints[index]
+            val b = pixelPoints[(index + 1) % 4]
+            val c = pixelPoints[(index + 2) % 4]
+            (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
+        }
+        if (crossProducts.any { it == 0f } ||
+            !(crossProducts.all { it > 0f } || crossProducts.all { it < 0f })
+        ) return false
+        val area = abs(pixelPoints.indices.sumOf { index ->
+            val a = pixelPoints[index]
+            val b = pixelPoints[(index + 1) % 4]
+            (a.x * b.y - b.x * a.y).toDouble()
+        }) / 2.0
+        if (area < imageWidth.toDouble() * imageHeight * 0.04) return false
+        return pixelPoints.indices.all { index ->
+            val a = pixelPoints[index]
+            val b = pixelPoints[(index + 1) % 4]
+            kotlin.math.hypot((b.x - a.x).toDouble(), (b.y - a.y).toDouble()) >= 24.0
+        }
     }
 
     fun warp(bitmap: Bitmap, corners: CropCorners): Bitmap {
+        require(isValid(corners, bitmap.width, bitmap.height)) { "Crop corners must form a valid quadrilateral." }
         val tl = android.graphics.PointF(corners.topLeft.x * bitmap.width, corners.topLeft.y * bitmap.height)
         val tr = android.graphics.PointF(corners.topRight.x * bitmap.width, corners.topRight.y * bitmap.height)
         val br = android.graphics.PointF(corners.bottomRight.x * bitmap.width, corners.bottomRight.y * bitmap.height)
         val bl = android.graphics.PointF(corners.bottomLeft.x * bitmap.width, corners.bottomLeft.y * bitmap.height)
-        val width = max(
-            ((tr.x - tl.x) * (tr.x - tl.x) + (tr.y - tl.y) * (tr.y - tl.y)).toDouble(),
-            ((br.x - bl.x) * (br.x - bl.x) + (br.y - bl.y) * (br.y - bl.y)).toDouble()
-        ).let { kotlin.math.sqrt(it).toInt().coerceIn(320, 1600) }
-        val height = max(
-            ((bl.x - tl.x) * (bl.x - tl.x) + (bl.y - tl.y) * (bl.y - tl.y)).toDouble(),
-            ((br.x - tr.x) * (br.x - tr.x) + (br.y - tr.y) * (br.y - tr.y)).toDouble()
-        ).let { kotlin.math.sqrt(it).toInt().coerceIn(200, 1000) }
+        fun distance(a: android.graphics.PointF, b: android.graphics.PointF) =
+            kotlin.math.hypot((a.x - b.x).toDouble(), (a.y - b.y).toDouble())
+        var width = ((distance(tl, tr) + distance(bl, br)) / 2.0).toInt().coerceAtLeast(1)
+        var height = ((distance(tl, bl) + distance(tr, br)) / 2.0).toInt().coerceAtLeast(1)
+        val maxPixels = bitmap.width.toLong() * bitmap.height
+        val outputPixels = width.toLong() * height
+        if (outputPixels > maxPixels) {
+            val scale = kotlin.math.sqrt(maxPixels.toDouble() / outputPixels)
+            width = (width * scale).toInt().coerceAtLeast(1)
+            height = (height * scale).toInt().coerceAtLeast(1)
+        }
         val output = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        val h = solveHomography(
-            listOf(
-                android.graphics.PointF(0f, 0f),
-                android.graphics.PointF(width.toFloat(), 0f),
-                android.graphics.PointF(width.toFloat(), height.toFloat()),
-                android.graphics.PointF(0f, height.toFloat())
-            ),
-            listOf(tl, tr, br, bl)
+        val source = floatArrayOf(tl.x, tl.y, tr.x, tr.y, br.x, br.y, bl.x, bl.y)
+        val destination = floatArrayOf(
+            0f, 0f, width.toFloat(), 0f,
+            width.toFloat(), height.toFloat(), 0f, height.toFloat()
         )
-        val src = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(src, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-        val dst = IntArray(width * height)
-        for (y in 0 until height) {
-            for (x in 0 until width) {
-                val denominator = h[6] * x + h[7] * y + h[8]
-                val sx = ((h[0] * x + h[1] * y + h[2]) / denominator).toInt()
-                val sy = ((h[3] * x + h[4] * y + h[5]) / denominator).toInt()
-                dst[y * width + x] = if (sx in 0 until bitmap.width && sy in 0 until bitmap.height)
-                    src[sy * bitmap.width + sx] else 0
-            }
+        val transform = Matrix()
+        check(transform.setPolyToPoly(source, 0, destination, 0, 4)) {
+            "Could not compute the perspective crop."
         }
-        output.setPixels(dst, 0, width, 0, 0, width, height)
+        Canvas(output).drawBitmap(
+            bitmap,
+            transform,
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG)
+        )
         return output
-    }
-
-    private fun solveHomography(src: List<android.graphics.PointF>, dst: List<android.graphics.PointF>): FloatArray {
-        val a = Array(8) { FloatArray(9) }
-        for (i in 0 until 4) {
-            val (x, y) = src[i].x to src[i].y
-            val (u, v) = dst[i].x to dst[i].y
-            a[i * 2][0] = x; a[i * 2][1] = y; a[i * 2][2] = 1f
-            a[i * 2][3] = 0f; a[i * 2][4] = 0f; a[i * 2][5] = 0f
-            a[i * 2][6] = -u * x; a[i * 2][7] = -u * y; a[i * 2][8] = u
-            a[i * 2 + 1][0] = 0f; a[i * 2 + 1][1] = 0f; a[i * 2 + 1][2] = 0f
-            a[i * 2 + 1][3] = x; a[i * 2 + 1][4] = y; a[i * 2 + 1][5] = 1f
-            a[i * 2 + 1][6] = -v * x; a[i * 2 + 1][7] = -v * y; a[i * 2 + 1][8] = v
-        }
-        val solution = gauss(a)
-        return floatArrayOf(
-            solution[0], solution[1], solution[2],
-            solution[3], solution[4], solution[5],
-            solution[6], solution[7], 1f
-        )
-    }
-
-    private fun gauss(a: Array<FloatArray>): FloatArray {
-        val n = 8
-        val m = a.map { it.copyOf(9) }.toTypedArray()
-        for (col in 0 until n) {
-            var pivot = col
-            for (row in col + 1 until n) if (abs(m[row][col]) > abs(m[pivot][col])) pivot = row
-            val tmp = m[col]; m[col] = m[pivot]; m[pivot] = tmp
-            val d = m[col][col]
-            if (abs(d) < 1e-6f) continue
-            for (j in col until 9) m[col][j] /= d
-            for (row in 0 until n) if (row != col) {
-                val factor = m[row][col]
-                for (j in col until 9) m[row][j] -= factor * m[col][j]
-            }
-        }
-        return FloatArray(n) { m[it][8] }
     }
 }

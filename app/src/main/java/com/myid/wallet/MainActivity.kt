@@ -10,6 +10,7 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.PickVisualMediaRequest
@@ -41,15 +42,17 @@ import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -60,6 +63,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.FileProvider
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.myid.wallet.data.AccountEntity
 import com.myid.wallet.data.AppDatabase
 import com.myid.wallet.data.DocumentEntity
@@ -70,13 +75,72 @@ import com.myid.wallet.ui.theme.MyIDTheme
 import com.myid.wallet.util.CardImageProcessor
 import com.myid.wallet.util.CropCorners
 import com.myid.wallet.util.OcrExtractor
-import com.myid.wallet.util.ExtractedDocumentMetadata
 import com.myid.wallet.util.PdfExporter
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
+import kotlin.math.hypot
+
+private val CropCornersSaver = listSaver<CropCorners, Float>(
+    save = {
+        listOf(
+            it.topLeft.x, it.topLeft.y, it.topRight.x, it.topRight.y,
+            it.bottomRight.x, it.bottomRight.y, it.bottomLeft.x, it.bottomLeft.y
+        )
+    },
+    restore = {
+        CropCorners(
+            android.graphics.PointF(it[0], it[1]),
+            android.graphics.PointF(it[2], it[3]),
+            android.graphics.PointF(it[4], it[5]),
+            android.graphics.PointF(it[6], it[7])
+        )
+    }
+)
+
+private fun decodeSampledBitmap(bytes: ByteArray, maxSide: Int): Bitmap? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    while (bounds.outWidth / sample > maxSide || bounds.outHeight / sample > maxSide) sample *= 2
+    return BitmapFactory.decodeByteArray(
+        bytes,
+        0,
+        bytes.size,
+        BitmapFactory.Options().apply {
+            inSampleSize = sample
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+        }
+    )
+}
+
+@Composable
+private fun rememberDecodedBitmap(bytes: ByteArray?, maxSide: Int): Bitmap? {
+    var bitmap by remember(bytes, maxSide) { mutableStateOf<Bitmap?>(null) }
+    LaunchedEffect(bytes, maxSide) {
+        bitmap = bytes?.let { source ->
+            withContext(Dispatchers.IO) { decodeSampledBitmap(source, maxSide) }
+        }
+    }
+    val currentBitmap = bitmap
+    DisposableEffect(currentBitmap) {
+        onDispose { currentBitmap?.recycle() }
+    }
+    return bitmap
+}
+
+internal class WalletSessionViewModel : ViewModel() {
+    val unlocked = mutableStateOf(false)
+    val nav = mutableStateOf(0)
+    val selected = mutableStateOf<DocumentEntity?>(null)
+    val editing = mutableStateOf<DocumentEntity?>(null)
+    val showAdd = mutableStateOf(false)
+    val quickShow = mutableStateOf<DocumentEntity?>(null)
+}
 
 class MainActivity : ComponentActivity() {
     private lateinit var repository: WalletRepository
@@ -137,20 +201,21 @@ private fun WalletRoot(
     onShare: (DocumentEntity, List<ByteArray>) -> Unit,
     onSave: (DocumentEntity, List<ByteArray>) -> Unit
 ) {
+    val session: WalletSessionViewModel = viewModel()
     val scope = rememberCoroutineScope()
     val documents by repository.documents.collectAsState(initial = emptyList())
     val account by repository.account.collectAsState(initial = null)
-    var unlocked by remember { mutableStateOf(false) }
+    var unlocked by session.unlocked
     var setupMode by remember { mutableStateOf(!pinManager.isConfigured()) }
     var pin by remember { mutableStateOf("") }
     var confirmPin by remember { mutableStateOf("") }
     var pinError by remember { mutableStateOf<String?>(null) }
     var dark by remember { mutableStateOf(false) }
-    var nav by remember { mutableStateOf(0) }
-    var selected by remember { mutableStateOf<DocumentEntity?>(null) }
-    var editing by remember { mutableStateOf<DocumentEntity?>(null) }
-    var showAdd by remember { mutableStateOf(false) }
-    var quickShow by remember { mutableStateOf<DocumentEntity?>(null) }
+    var nav by session.nav
+    var selected by session.selected
+    var editing by session.editing
+    var showAdd by session.showAdd
+    var quickShow by session.quickShow
 
     MyIDTheme(dark) {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
@@ -336,18 +401,31 @@ private fun WalletRoot(
                                 @Composable
                                 private fun EncryptedImage(repository: WalletRepository, fileName: String) {
                                     var bitmap by remember(fileName) { mutableStateOf<Bitmap?>(null) }
+                                    var unavailable by remember(fileName) { mutableStateOf(false) }
                                     LaunchedEffect(fileName) {
                                         if (fileName.isNotBlank()) {
-                                            withContext(Dispatchers.IO) {
-                                                val bytes = repository.readEncryptedImage(fileName)
-                                                val result = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                                withContext(Dispatchers.Main) { bitmap = result }
+                                            try {
+                                                bitmap = withContext(Dispatchers.IO) {
+                                                    val bytes = repository.readEncryptedImage(fileName)
+                                                    decodeSampledBitmap(bytes, 1200)
+                                                }
+                                                unavailable = bitmap == null
+                                            } catch (e: CancellationException) {
+                                                throw e
+                                            } catch (e: Exception) {
+                                                unavailable = true
                                             }
                                         }
-                                                }
+                                    }
+                                    val currentBitmap = bitmap
+                                    DisposableEffect(currentBitmap) {
+                                        onDispose { currentBitmap?.recycle() }
+                                    }
                                     if (bitmap != null) {
                                         Image(bitmap!!.asImageBitmap(), null, Modifier.fillMaxSize(),
                                             contentScale = androidx.compose.ui.layout.ContentScale.Crop)
+                                    } else if (unavailable) {
+                                        Text("Image unavailable", Modifier.fillMaxSize().wrapContentSize(Alignment.Center))
                                     }
                                 }
 
@@ -374,9 +452,78 @@ private fun WalletRoot(
                                             var ocrName by remember { mutableStateOf(existing?.holderName ?: "") }
                                             var ocrDob by remember { mutableStateOf(existing?.dateOfBirth ?: "") }
                                             var ocrExpiry by remember { mutableStateOf(existing?.expiryDate ?: "") }
-                                            var cropSide by remember { mutableStateOf<String?>(null) }
+                                            var cropSide by rememberSaveable { mutableStateOf<String?>(null) }
+                                            var cropUriText by rememberSaveable { mutableStateOf<String?>(null) }
+                                            var cropRequestId by rememberSaveable { mutableStateOf(0) }
+                                            var cameraUriText by rememberSaveable { mutableStateOf<String?>(null) }
+                                            var cameraTempName by rememberSaveable { mutableStateOf<String?>(null) }
+                                            var cropRotation by rememberSaveable { mutableStateOf(0) }
+                                            var cropCorners by rememberSaveable(stateSaver = CropCornersSaver) {
+                                                mutableStateOf(CropCorners())
+                                            }
                                             var cropBitmap by remember { mutableStateOf<Bitmap?>(null) }
-                                            var cropCorners by remember { mutableStateOf(CropCorners()) }
+                                            var cropResultBytes by remember { mutableStateOf<ByteArray?>(null) }
+                                            var cropResultPreview by remember { mutableStateOf<Bitmap?>(null) }
+                                            var cropProcessing by remember { mutableStateOf(false) }
+
+                                            fun clearCropSource() {
+                                                cropBitmap?.recycle()
+                                                cropBitmap = null
+                                                cropUriText = null
+                                                cropSide = null
+                                                cropRotation = 0
+                                                cropResultBytes = null
+                                                cropResultPreview?.recycle()
+                                                cropResultPreview = null
+                                                cameraTempName?.let { File(context.cacheDir, it).delete() }
+                                                cameraTempName = null
+                                                cameraUriText = null
+                                            }
+
+                                            fun startCrop(uri: Uri, side: String, capturedCameraFile: String? = null) {
+                                                cropBitmap?.recycle()
+                                                cropBitmap = null
+                                                cropResultBytes = null
+                                                cropResultPreview?.recycle()
+                                                cropResultPreview = null
+                                                cropRequestId++
+                                                cropUriText = uri.toString()
+                                                cropSide = side
+                                                cropRotation = 0
+                                                cropCorners = CropCorners()
+                                                cameraTempName = capturedCameraFile
+                                                cameraUriText = if (capturedCameraFile != null) uri.toString() else null
+                                            }
+
+                                            LaunchedEffect(cropUriText, cropRotation, cropRequestId) {
+                                                val source = cropUriText?.let(Uri::parse) ?: return@LaunchedEffect
+                                                val requestId = cropRequestId
+                                                val decoded = try {
+                                                    withContext(Dispatchers.IO) {
+                                                        CardImageProcessor.decode(context, source)
+                                                    }
+                                                } catch (e: CancellationException) {
+                                                    throw e
+                                                } catch (e: Exception) {
+                                                    error = e.message ?: "Could not read selected image."
+                                                    null
+                                                }
+                                                if (requestId != cropRequestId) {
+                                                    decoded?.recycle()
+                                                    return@LaunchedEffect
+                                                }
+                                                if (decoded == null) {
+                                                    error = "Could not read selected image."
+                                                } else {
+                                                    val rotated = CardImageProcessor.rotateBitmap(decoded, cropRotation)
+                                                    cropBitmap?.takeIf { it !== rotated }?.recycle()
+                                                    cropBitmap = rotated
+                                                }
+                                            }
+
+                                            BackHandler(enabled = cropUriText != null) {
+                                                clearCropSource()
+                                            }
 
                                             LaunchedEffect(existing?.id) {
                                                 existing?.let { doc ->
@@ -405,7 +552,7 @@ private fun WalletRoot(
                                                                 Text(title, fontWeight = FontWeight.Bold)
                                                                 Spacer(Modifier.height(10.dp))
                                                                 if (bytes != null) {
-                                                                    val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                                                                    val bitmap = rememberDecodedBitmap(bytes, 1600)
                                                                     bitmap?.let {
                                                                         Image(it.asImageBitmap(), null, Modifier.fillMaxWidth().height(180.dp),
                                                                             contentScale = ContentScale.Fit)
@@ -436,149 +583,428 @@ private fun WalletRoot(
                                                     fun CropEditorScreen(
                                                         bitmap: Bitmap,
                                                         corners: CropCorners,
+                                                        onCornersChange: (CropCorners) -> Unit,
                                                         onCancel: () -> Unit,
-                                                        onDone: (Bitmap) -> Unit
+                                                        onApply: () -> Unit,
+                                                        onRotate: (Int) -> Unit,
+                                                        onReset: () -> Unit,
+                                                        onGallery: () -> Unit,
+                                                        onCamera: () -> Unit
                                                     ) {
-                                                        val state = remember(corners) { mutableStateOf(corners) }
-                                                        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(16.dp)) {
+                                                        var zoom by rememberSaveable { mutableStateOf(1f) }
+                                                        var panX by rememberSaveable { mutableStateOf(0f) }
+                                                        var panY by rememberSaveable { mutableStateOf(0f) }
+                                                        var previewResult by remember { mutableStateOf<Bitmap?>(null) }
+                                                        var previewing by remember { mutableStateOf(false) }
+                                                        val latestCorners by rememberUpdatedState(corners)
+                                                        val latestPanX by rememberUpdatedState(panX)
+                                                        val latestPanY by rememberUpdatedState(panY)
+                                                        val latestZoom by rememberUpdatedState(zoom)
+                                                        val density = androidx.compose.ui.platform.LocalDensity.current
+                                                        val handleHitRadius = with(density) { 28.dp.toPx() }
+
+                                                        DisposableEffect(previewResult) {
+                                                            onDispose { previewResult?.recycle() }
+                                                        }
+                                                        Column(
+                                                            Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).padding(16.dp)
+                                                        ) {
                                                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                                                TextButton(onClick = onCancel) { Icon(Icons.Default.ArrowBack, null); Text("Cancel") }
+                                                                TextButton(onClick = onCancel) {
+                                                                    Icon(Icons.Default.ArrowBack, null)
+                                                                    Text("Cancel")
+                                                                }
                                                                 Spacer(Modifier.weight(1f))
                                                                 Text("Adjust card edges", fontWeight = FontWeight.Bold)
                                                             }
-                                                            Spacer(Modifier.height(12.dp))
-                                                            Box(
-                                                                Modifier.fillMaxWidth().weight(1f).pointerInput(Unit) {},
-                                                                contentAlignment = Alignment.Center
-                                                            ) {
-                                                                Image(bitmap.asImageBitmap(), "Crop preview", Modifier.fillMaxSize(), contentScale = ContentScale.Fit)
-                                                                Canvas(
-                                                                    Modifier.fillMaxSize().pointerInput(Unit) {
-                                                                        detectDragGestures { change, drag ->
-                                                                            change.consume()
-                                                                            val c = state.value
-                                                                            val points = listOf(c.topLeft, c.topRight, c.bottomRight, c.bottomLeft)
-                                                                            val pos = change.position
-                                                                            val size = this.size
-                                                                            var nearest = 0
-                                                                            var best = Float.MAX_VALUE
+                                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                                TextButton(onClick = { onRotate(-90) }, Modifier.weight(1f)) { Text("Rotate left") }
+                                                                TextButton(onClick = { onRotate(90) }, Modifier.weight(1f)) { Text("Rotate right") }
+                                                            }
+                                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                                TextButton(onClick = { zoom = (zoom * 1.25f).coerceAtMost(4f) }, Modifier.weight(1f)) {
+                                                                    Text("Zoom +")
+                                                                }
+                                                                TextButton(onClick = { zoom = (zoom / 1.25f).coerceAtLeast(.5f) }, Modifier.weight(1f)) {
+                                                                    Text("Zoom -")
+                                                                }
+                                                                TextButton(onClick = {
+                                                                    onReset()
+                                                                    zoom = 1f
+                                                                    panX = 0f
+                                                                    panY = 0f
+                                                                }, Modifier.weight(1f)) { Text("Reset") }
+                                                            }
+                                                            Canvas(
+                                                                Modifier.fillMaxWidth().weight(1f).pointerInput(bitmap) {
+                                                                    var activeHandle: Int? = null
+                                                                    detectDragGestures(
+                                                                        onDragStart = { position ->
+                                                                            val matrix = CardImageProcessor.imageToViewMatrix(
+                                                                                bitmap.width, bitmap.height, size.width.toFloat(),
+                                                                                size.height.toFloat(), latestZoom,
+                                                                                android.graphics.PointF(latestPanX, latestPanY)
+                                                                            )
+                                                                            val points = listOf(
+                                                                                latestCorners.topLeft, latestCorners.topRight,
+                                                                                latestCorners.bottomRight, latestCorners.bottomLeft
+                                                                            )
+                                                                            val viewPoints = FloatArray(8)
                                                                             points.forEachIndexed { index, point ->
-                                                                                val dx = pos.x - point.x * size.width
-                                                                                val dy = pos.y - point.y * size.height
-                                                                                val distance = dx * dx + dy * dy
-                                                                                if (distance < best) { best = distance; nearest = index }
+                                                                                viewPoints[index * 2] = point.x * bitmap.width
+                                                                                viewPoints[index * 2 + 1] = point.y * bitmap.height
                                                                             }
-                                                                            val dx = drag.x / size.width
-                                                                            val dy = drag.y / size.height
-                                                                            when (nearest) {
-                                                                                0 -> c.topLeft.offset(dx, dy)
-                                                                                1 -> c.topRight.offset(dx, dy)
-                                                                                2 -> c.bottomRight.offset(dx, dy)
-                                                                                3 -> c.bottomLeft.offset(dx, dy)
+                                                                            matrix.mapPoints(viewPoints)
+                                                                            activeHandle = (0..3).minByOrNull { index ->
+                                                                                hypot(
+                                                                                    position.x - viewPoints[index * 2],
+                                                                                    position.y - viewPoints[index * 2 + 1]
+                                                                                )
+                                                                            }?.takeIf { index ->
+                                                                                hypot(
+                                                                                    position.x - viewPoints[index * 2],
+                                                                                    position.y - viewPoints[index * 2 + 1]
+                                                                                ) <= handleHitRadius
                                                                             }
-                                                                            state.value = c
+                                                                        },
+                                                                        onDragEnd = { activeHandle = null },
+                                                                        onDragCancel = { activeHandle = null }
+                                                                    ) { change, drag ->
+                                                                        change.consume()
+                                                                        val handle = activeHandle
+                                                                        if (handle == null) {
+                                                                            panX += drag.x
+                                                                            panY += drag.y
+                                                                        } else {
+                                                                            val matrix = CardImageProcessor.imageToViewMatrix(
+                                                                                bitmap.width, bitmap.height, size.width.toFloat(),
+                                                                                size.height.toFloat(), latestZoom,
+                                                                                android.graphics.PointF(latestPanX, latestPanY)
+                                                                            )
+                                                                            val imagePoint = CardImageProcessor.viewToImagePoint(
+                                                                                matrix, change.position.x, change.position.y
+                                                                            ) ?: return@detectDragGestures
+                                                                            CardImageProcessor.moveCorner(
+                                                                                latestCorners, handle,
+                                                                                imagePoint.x / bitmap.width,
+                                                                                imagePoint.y / bitmap.height,
+                                                                                bitmap.width, bitmap.height
+                                                                            )?.let(onCornersChange)
                                                                         }
                                                                     }
-                                                                ) {
-                                                                    val c = state.value
-                                                                    val points = listOf(c.topLeft, c.topRight, c.bottomRight, c.bottomLeft)
-                                                                    val px = points.map { Offset(it.x * size.width, it.y * size.height) }
-                                                                    val path = Path().apply {
-                                                                        moveTo(px[0].x, px[0].y)
-                                                                        px.drop(1).forEach { lineTo(it.x, it.y) }
-                                                                        close()
+                                                                }
+                                                            ) {
+                                                                drawRect(Color.Black)
+                                                                val matrix = CardImageProcessor.imageToViewMatrix(
+                                                                    bitmap.width, bitmap.height, size.width, size.height,
+                                                                    zoom, android.graphics.PointF(panX, panY)
+                                                                )
+                                                                drawContext.canvas.nativeCanvas.drawBitmap(
+                                                                    bitmap, matrix,
+                                                                    android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG)
+                                                                )
+                                                                val mapped = FloatArray(8)
+                                                                listOf(corners.topLeft, corners.topRight, corners.bottomRight, corners.bottomLeft)
+                                                                    .forEachIndexed { index, point ->
+                                                                        mapped[index * 2] = point.x * bitmap.width
+                                                                        mapped[index * 2 + 1] = point.y * bitmap.height
                                                                     }
-                                                                    drawPath(path, Color(0xFF3B82F6).copy(alpha = .20f))
-                                                                    drawPath(path, Color(0xFF3B82F6), style = Stroke(width = 4f))
-                                                                    px.forEach { drawCircle(Color.White, 16f); drawCircle(Color(0xFF3B82F6), 11f) }
+                                                                matrix.mapPoints(mapped)
+                                                                val points = (0..3).map { index ->
+                                                                    Offset(mapped[index * 2], mapped[index * 2 + 1])
+                                                                }
+                                                                val boundary = Path().apply {
+                                                                    moveTo(points[0].x, points[0].y)
+                                                                    points.drop(1).forEach { lineTo(it.x, it.y) }
+                                                                    close()
+                                                                }
+                                                                drawPath(boundary, Color(0xFF3B82F6).copy(alpha = .18f))
+                                                                drawPath(boundary, Color(0xFF3B82F6), style = Stroke(width = 3.dp.toPx()))
+                                                                points.forEach { point ->
+                                                                    drawCircle(Color.White, 28.dp.toPx(), point)
+                                                                    drawCircle(Color(0xFF3B82F6), 18.dp.toPx(), point)
                                                                 }
                                                             }
-                                                            Spacer(Modifier.height(12.dp))
-                                                            Text("Drag the blue handles to correct the card boundaries.", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                                            Spacer(Modifier.height(12.dp))
-                                                            Button(onClick = { onDone(CardImageProcessor.warp(bitmap, state.value)) },
-                                                                modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Use Cropped Card") }
+                                                            Text(
+                                                                "Drag each corner handle. Drag elsewhere to pan; use zoom controls for precision.",
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                            )
+                                                            error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                                OutlinedButton(
+                                                                    onClick = {
+                                                                        previewing = true
+                                                                        scope.launch {
+                                                                            try {
+                                                                                val candidate = withContext(Dispatchers.Default) {
+                                                                                    CardImageProcessor.warp(bitmap, corners)
+                                                                                }
+                                                                                previewResult?.recycle()
+                                                                                previewResult = candidate
+                                                                            } catch (e: CancellationException) {
+                                                                                throw e
+                                                                            } catch (e: Exception) {
+                                                                                error = e.message ?: "Could not preview the crop."
+                                                                            } finally {
+                                                                                previewing = false
+                                                                            }
+                                                                        }
+                                                                    },
+                                                                    modifier = Modifier.weight(1f),
+                                                                    enabled = !previewing
+                                                                ) { Text(if (previewing) "Preparing…" else "Preview Result") }
+                                                                Button(
+                                                                    onClick = onApply,
+                                                                    modifier = Modifier.weight(1f),
+                                                                    enabled = !cropProcessing && CardImageProcessor.isValid(
+                                                                        corners, bitmap.width, bitmap.height
+                                                                    )
+                                                                ) { Text(if (cropProcessing) "Applying…" else "Apply Crop") }
+                                                            }
+                                                            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                                                                TextButton(onClick = onCamera) { Text("Retake") }
+                                                                TextButton(onClick = onGallery) { Text("Choose another image") }
+                                                            }
+                                                        }
+                                                        if (previewResult != null) {
+                                                            AlertDialog(
+                                                                onDismissRequest = {
+                                                                    previewResult?.recycle()
+                                                                    previewResult = null
+                                                                },
+                                                                title = { Text("Crop preview") },
+                                                                text = {
+                                                                    Image(
+                                                                        previewResult!!.asImageBitmap(),
+                                                                        "Perspective crop preview",
+                                                                        Modifier.fillMaxWidth().height(240.dp),
+                                                                        contentScale = ContentScale.Fit
+                                                                    )
+                                                                },
+                                                                confirmButton = {
+                                                                    TextButton(onClick = {
+                                                                        previewResult?.recycle()
+                                                                        previewResult = null
+                                                                    }) { Text("Continue editing") }
+                                                                }
+                                                            )
                                                         }
                                                     }
 
-                                            var pendingSide by remember { mutableStateOf("front") }
-                                            var cameraUri by remember { mutableStateOf<Uri?>(null) }
+                                            var pendingSide by rememberSaveable { mutableStateOf("front") }
                                             val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { success ->
-                                                if (success) {
-                                                    cameraUri?.let { uri ->
-                                                        val bitmap = CardImageProcessor.decode(context, uri)
-                                                        if (bitmap != null) {
-                                                            cropBitmap = bitmap
-                                                            cropCorners = CardImageProcessor.detectCorners(bitmap)
-                                                            cropSide = pendingSide
-                                                        } else error = "Could not read captured image."
-                                                    }
-                                                }
-                                            }
-                                            val cameraPermission = rememberLauncherForActivityResult(
-                                                ActivityResultContracts.RequestPermission()
-                                            ) { granted ->
-                                                if (granted) {
-                                                    val file = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
-                                                    val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
-                                                    cameraUri = uri
-                                                    cameraLauncher.launch(uri)
+                                                val uri = cameraUriText?.let(Uri::parse)
+                                                if (success && uri != null) {
+                                                    cropBitmap?.recycle()
+                                                    cropBitmap = null
+                                                    cropResultPreview?.recycle()
+                                                    cropResultPreview = null
+                                                    cropResultBytes = null
+                                                    cropRequestId++
+                                                    cropUriText = uri.toString()
+                                                    cropSide = pendingSide
+                                                    cropRotation = 0
+                                                    cropCorners = CropCorners()
                                                 } else {
-                                                    error = "Camera permission is required to capture an image."
+                                                    cameraTempName?.let { File(context.cacheDir, it).delete() }
+                                                    cameraTempName = null
+                                                    cameraUriText = null
+                                                    if (success) error = "Could not open the captured image."
                                                 }
                                             }
                                             val frontGallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
                                                 if (uri != null) {
-                                                    val bitmap = CardImageProcessor.decode(context, uri)
-                                                    if (bitmap != null) {
-                                                        cropBitmap = bitmap
-                                                        cropCorners = CardImageProcessor.detectCorners(bitmap)
-                                                        cropSide = "front"
-                                                    } else error = "Could not read selected image."
+                                                    cameraTempName?.let { File(context.cacheDir, it).delete() }
+                                                    cameraTempName = null
+                                                    cameraUriText = null
+                                                    startCrop(uri, "front")
                                                 }
                                             }
                                             val backGallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
                                                 if (uri != null) {
-                                                    val bitmap = CardImageProcessor.decode(context, uri)
-                                                    if (bitmap != null) {
-                                                        cropBitmap = bitmap
-                                                        cropCorners = CardImageProcessor.detectCorners(bitmap)
-                                                        cropSide = "back"
-                                                    } else error = "Could not read selected image."
+                                                    cameraTempName?.let { File(context.cacheDir, it).delete() }
+                                                    cameraTempName = null
+                                                    cameraUriText = null
+                                                    startCrop(uri, "back")
                                                 }
                                             }
 
                                             fun startCamera(side: String) {
+                                                cropBitmap?.recycle()
+                                                cropBitmap = null
+                                                cropResultBytes = null
+                                                cropResultPreview?.recycle()
+                                                cropResultPreview = null
+                                                cropUriText = null
+                                                cameraTempName?.let { File(context.cacheDir, it).delete() }
                                                 pendingSide = side
-                                                cameraPermission.launch(android.Manifest.permission.CAMERA)
+                                                val file = File(context.cacheDir, "camera_${System.currentTimeMillis()}.jpg")
+                                                try {
+                                                    val uri = FileProvider.getUriForFile(
+                                                        context, "${context.packageName}.fileprovider", file
+                                                    )
+                                                    cameraTempName = file.name
+                                                    cameraUriText = uri.toString()
+                                                    cameraLauncher.launch(uri)
+                                                } catch (e: Exception) {
+                                                    file.delete()
+                                                    cameraTempName = null
+                                                    cameraUriText = null
+                                                    error = e.message ?: "Could not open the camera."
+                                                }
+                                            }
+
+                                            fun applyCrop() {
+                                                val sourceUri = cropUriText?.let(Uri::parse) ?: return
+                                                if (cropSide == null) return
+                                                cropProcessing = true
+                                                error = null
+                                                scope.launch {
+                                                    try {
+                                                        val result = withContext(Dispatchers.IO) {
+                                                            val original = CardImageProcessor.decodeFull(context, sourceUri)
+                                                                ?: throw IllegalStateException("Could not read the original image.")
+                                                            val oriented = CardImageProcessor.rotateBitmap(original, cropRotation)
+                                                            try {
+                                                                require(CardImageProcessor.isValid(cropCorners, oriented.width, oriented.height)) {
+                                                                    "Crop corners are too close together or form an invalid shape."
+                                                                }
+                                                                val corrected = CardImageProcessor.warp(oriented, cropCorners)
+                                                                try {
+                                                                    val stream = ByteArrayOutputStream()
+                                                                    check(corrected.compress(Bitmap.CompressFormat.JPEG, 95, stream)) {
+                                                                        "Could not encode the cropped image."
+                                                                    }
+                                                                    val scale = minOf(
+                                                                        1f,
+                                                                        1400f / maxOf(corrected.width, corrected.height)
+                                                                    )
+                                                                    val preview = if (scale < 1f) {
+                                                                        Bitmap.createScaledBitmap(
+                                                                            corrected,
+                                                                            (corrected.width * scale).toInt().coerceAtLeast(1),
+                                                                            (corrected.height * scale).toInt().coerceAtLeast(1),
+                                                                            true
+                                                                        )
+                                                                    } else corrected.copy(Bitmap.Config.ARGB_8888, false)
+                                                                        ?: throw IllegalStateException("Could not create crop preview.")
+                                                                    stream.toByteArray() to preview
+                                                                } finally {
+                                                                    corrected.recycle()
+                                                                }
+                                                            } finally {
+                                                                oriented.recycle()
+                                                            }
+                                                        }
+                                                        cropResultBytes = result.first
+                                                        cropResultPreview = result.second
+                                                    } catch (e: CancellationException) {
+                                                        throw e
+                                                    } catch (e: Exception) {
+                                                        error = e.message ?: "Could not apply the crop."
+                                                    } finally {
+                                                        cropProcessing = false
+                                                    }
+                                                }
+                                            }
+
+                                            if (cropResultBytes != null && cropResultPreview != null && cropSide != null) {
+                                                Column(
+                                                    Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
+                                                    horizontalAlignment = Alignment.CenterHorizontally
+                                                ) {
+                                                    Text("Preview cropped image", fontSize = 24.sp, fontWeight = FontWeight.Bold)
+                                                    error?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+                                                    Spacer(Modifier.height(16.dp))
+                                                    Image(
+                                                        cropResultPreview!!.asImageBitmap(),
+                                                        "Perspective-corrected image",
+                                                        Modifier.fillMaxWidth().heightIn(max = 480.dp),
+                                                        contentScale = ContentScale.Fit
+                                                    )
+                                                    Spacer(Modifier.height(16.dp))
+                                                    Button(
+                                                        onClick = {
+                                                            val bytes = cropResultBytes
+                                                            val preview = cropResultPreview
+                                                            if (cropSide == "front") frontBytes = bytes else {
+                                                                backBytes = bytes
+                                                                removeBack = false
+                                                            }
+                                                            cropResultBytes = null
+                                                            cropResultPreview = null
+                                                            cropBitmap?.recycle()
+                                                            cropBitmap = null
+                                                            cropUriText = null
+                                                            cropSide = null
+                                                            cropRotation = 0
+                                                            cameraTempName?.let { File(context.cacheDir, it).delete() }
+                                                            cameraTempName = null
+                                                            cameraUriText = null
+                                                            if (preview != null) {
+                                                                scope.launch {
+                                                                    try {
+                                                                        val result = OcrExtractor.extract(preview)
+                                                                        ocrNumber = result.documentNumber ?: ""
+                                                                        ocrName = result.holderName ?: ""
+                                                                        ocrDob = result.dateOfBirth ?: ""
+                                                                        ocrExpiry = result.expiryDate ?: ""
+                                                                        showOcrReview = true
+                                                                    } catch (e: CancellationException) {
+                                                                        throw e
+                                                                    } catch (e: Exception) {
+                                                                        error = e.message ?: "Could not read document text."
+                                                                    } finally {
+                                                                        preview.recycle()
+                                                                    }
+                                                                }
+                                                            }
+                                                        },
+                                                        modifier = Modifier.fillMaxWidth().height(54.dp)
+                                                    ) { Text("Confirm Image") }
+                                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
+                                                        TextButton(onClick = { startCamera(cropSide!!) }) { Text("Retake") }
+                                                        TextButton(onClick = {
+                                                            val side = cropSide!!
+                                                            cropResultBytes = null
+                                                            cropResultPreview?.recycle()
+                                                            cropResultPreview = null
+                                                            if (side == "front") {
+                                                                frontGallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                                            } else {
+                                                                backGallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                                                            }
+                                                        }) { Text("Choose another image") }
+                                                        TextButton(onClick = ::clearCropSource) { Text("Cancel") }
+                                                    }
+                                                }
+                                                return
                                             }
 
                                             if (cropBitmap != null && cropSide != null) {
                                                 CropEditorScreen(
                                                     bitmap = cropBitmap!!,
                                                     corners = cropCorners,
-                                                    onCancel = { cropBitmap = null; cropSide = null },
-                                                    onDone = { cropped ->
-                                                        val stream = ByteArrayOutputStream()
-                                                        cropped.compress(Bitmap.CompressFormat.JPEG, 92, stream)
+                                                    onCornersChange = { cropCorners = it },
+                                                    onCancel = ::clearCropSource,
+                                                    onApply = ::applyCrop,
+                                                    onRotate = { degrees ->
+                                                        cropCorners = CardImageProcessor.rotateCorners(cropCorners, degrees)
+                                                        cropRotation = (cropRotation + degrees + 360) % 360
+                                                    },
+                                                    onReset = {
+                                                        cropCorners = CropCorners()
+                                                        cropRotation = 0
+                                                    },
+                                                    onGallery = {
                                                         if (cropSide == "front") {
-                                                            frontBytes = stream.toByteArray()
+                                                            frontGallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                                                         } else {
-                                                            backBytes = stream.toByteArray()
-                                                            removeBack = false
+                                                            backGallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                                                         }
-                                                        scope.launch {
-                                                            val result = OcrExtractor.extract(cropped)
-                                                            ocrNumber = result.documentNumber ?: ""
-                                                            ocrName = result.holderName ?: ""
-                                                            ocrDob = result.dateOfBirth ?: ""
-                                                            ocrExpiry = result.expiryDate ?: ""
-                                                            showOcrReview = true
-                                                            cropped.recycle()
-                                                        }
-                                                        cropBitmap = null
-                                                        cropSide = null
-                                                    })
+                                                    },
+                                                    onCamera = { startCamera(cropSide!!) }
+                                                )
                                                 return
                                             }
 
@@ -624,6 +1050,8 @@ private fun WalletRoot(
                                                                     ocrDob.ifBlank { null },
                                                                     ocrExpiry.ifBlank { null })
                                                                 onSaved()
+                                                            } catch (e: CancellationException) {
+                                                                throw e
                                                             } catch (e: Exception) {
                                                                 error = e.message ?: "Could not save document."
                                                             }
@@ -674,10 +1102,22 @@ private fun WalletRoot(
                                                                         val rotation by animateFloatAsState(if (isBack) 180f else 0f, label = "cardFlip")
 
                                                                         LaunchedEffect(document.id) {
-                                                                            withContext(Dispatchers.IO) {
-                                                                                val f = if (document.frontFile.isNotBlank()) repository.readEncryptedImage(document.frontFile) else null
-                                                                                val b = document.backFile?.let { repository.readEncryptedImage(it) }
-                                                                                withContext(Dispatchers.Main) { front = f; back = b }
+                                                                            try {
+                                                                                val images = withContext(Dispatchers.IO) {
+                                                                                    val f = if (document.frontFile.isNotBlank()) {
+                                                                                        repository.readEncryptedImage(document.frontFile)
+                                                                                    } else null
+                                                                                    val b = document.backFile?.let {
+                                                                                        repository.readEncryptedImage(it)
+                                                                                    }
+                                                                                    f to b
+                                                                                }
+                                                                                front = images.first
+                                                                                back = images.second
+                                                                            } catch (e: CancellationException) {
+                                                                                throw e
+                                                                            } catch (e: Exception) {
+                                                                                error = e.message ?: "Could not load this document."
                                                                             }
                                                                         }
 
@@ -698,7 +1138,7 @@ private fun WalletRoot(
                                                                                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                                                                     val bytes = if (isBack) back else front
                                                                                     if (bytes != null) {
-                                                                                        val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                                                                                        val bitmap = rememberDecodedBitmap(bytes, 2000)
                                                                                         if (bitmap != null) {
                                                                                             Image(bitmap.asImageBitmap(), null, Modifier.fillMaxSize().graphicsLayer {
                                                                                                 if (isBack) rotationY = 180f
@@ -775,29 +1215,59 @@ private fun WalletRoot(
                                                                             var error by remember { mutableStateOf<String?>(null) }
 
                                                                             LaunchedEffect(account?.profileFile) {
-                                                                                account?.profileFile?.let { file ->
-                                                                                    withContext(Dispatchers.IO) {
-                                                                                        val bytes = repository.readEncryptedImage(file)
-                                                                                        withContext(Dispatchers.Main) { profileBytes = bytes }
+                                                                                try {
+                                                                                    profileBytes = account?.profileFile?.let { file ->
+                                                                                        withContext(Dispatchers.IO) {
+                                                                                            repository.readEncryptedImage(file)
+                                                                                        }
                                                                                     }
-                                                                                } ?: run { profileBytes = null }
+                                                                                } catch (e: CancellationException) {
+                                                                                    throw e
+                                                                                } catch (e: Exception) {
+                                                                                    error = e.message ?: "Could not load profile image."
+                                                                                }
                                                                             }
 
                                                                             val profileGallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
                                                                                 if (uri != null) {
-                                                                                    context.contentResolver.openInputStream(uri)?.use { input ->
-                                                                                        val bytes = input.readBytes()
-                                                                                        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                                                                        if (bitmap != null) {
+                                                                                    scope.launch {
+                                                                                        var bitmap: Bitmap? = null
+                                                                                        var scaled: Bitmap? = null
+                                                                                        try {
+                                                                                            val sourceBitmap = withContext(Dispatchers.IO) {
+                                                                                                CardImageProcessor.decode(context, uri)
+                                                                                            } ?: throw IllegalStateException("Could not read profile image.")
+                                                                                            bitmap = sourceBitmap
+                                                                                            val scale = minOf(
+                                                                                                1f,
+                                                                                                800f / maxOf(sourceBitmap.width, sourceBitmap.height)
+                                                                                            )
+                                                                                            val profileBitmap = if (scale < 1f) {
+                                                                                                Bitmap.createScaledBitmap(
+                                                                                                    sourceBitmap,
+                                                                                                    (sourceBitmap.width * scale).toInt().coerceAtLeast(1),
+                                                                                                    (sourceBitmap.height * scale).toInt().coerceAtLeast(1),
+                                                                                                    true
+                                                                                                )
+                                                                                            } else sourceBitmap.copy(Bitmap.Config.ARGB_8888, false)
+                                                                                                ?: throw IllegalStateException("Could not resize profile image.")
+                                                                                            scaled = profileBitmap
                                                                                             val stream = ByteArrayOutputStream()
-                                                                                            val scaled = Bitmap.createScaledBitmap(bitmap,
-                                                                                                minOf(800, bitmap.width), minOf(800, bitmap.height), true)
-                                                                                            scaled.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+                                                                                            withContext(Dispatchers.IO) {
+                                                                                                check(profileBitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)) {
+                                                                                                    "Could not encode profile image."
+                                                                                                }
+                                                                                            }
                                                                                             profileBytes = stream.toByteArray()
                                                                                             removeProfile = false
-                                                                                            scaled.recycle()
-                                                                                            bitmap.recycle()
-                                                                                        } else error = "Could not read profile image."
+                                                                                        } catch (e: CancellationException) {
+                                                                                            throw e
+                                                                                        } catch (e: Exception) {
+                                                                                            error = e.message ?: "Could not read profile image."
+                                                                                        } finally {
+                                                                                            scaled?.recycle()
+                                                                                            bitmap?.recycle()
+                                                                                        }
                                                                                     }
                                                                                 }
                                                                             }
@@ -839,7 +1309,11 @@ private fun WalletRoot(
                                                                                                 repository.saveAccount(account, name.trim(), ageValue, mobile.trim(), profileBytes, removeProfile)
                                                                                                 editing = false
                                                                                                 error = null
-                                                                                            } catch (e: Exception) { error = e.message ?: "Could not save profile." }
+                                                                                            } catch (e: CancellationException) {
+                                                                                                throw e
+                                                                                            } catch (e: Exception) {
+                                                                                                error = e.message ?: "Could not save profile."
+                                                                                            }
                                                                                         }
                                                                                     }, modifier = Modifier.fillMaxWidth().height(54.dp)) { Text("Save Profile") }
                                                                                 }
@@ -900,7 +1374,7 @@ private fun WalletRoot(
                                                                             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                                                                                 Surface(Modifier.size(116.dp), shape = CircleShape, color = Color(0xFFE5ECF5)) {
                                                                                     if (bytes != null) {
-                                                                                        val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                                                                                        val bitmap = rememberDecodedBitmap(bytes, 800)
                                                                                         if (bitmap != null) Image(bitmap.asImageBitmap(), "Profile image",
                                                                                             Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                                                                                     } else Icon(Icons.Default.AccountCircle, null, Modifier.fillMaxSize().padding(18.dp),
@@ -913,13 +1387,26 @@ private fun WalletRoot(
                                                                                 var isBack by remember(document.id) { mutableStateOf(false) }
                                                                                 var front by remember(document.id) { mutableStateOf<ByteArray?>(null) }
                                                                                 var back by remember(document.id) { mutableStateOf<ByteArray?>(null) }
+                                                                                var error by remember(document.id) { mutableStateOf<String?>(null) }
                                                                                 val rotation by animateFloatAsState(if (isBack) 180f else 0f, label = "quickShowFlip")
 
                                                                                 LaunchedEffect(document.id) {
-                                                                                    withContext(Dispatchers.IO) {
-                                                                                        val f = if (document.frontFile.isNotBlank()) repository.readEncryptedImage(document.frontFile) else null
-                                                                                        val b = document.backFile?.let { repository.readEncryptedImage(it) }
-                                                                                        withContext(Dispatchers.Main) { front = f; back = b }
+                                                                                    try {
+                                                                                        val images = withContext(Dispatchers.IO) {
+                                                                                            val f = if (document.frontFile.isNotBlank()) {
+                                                                                                repository.readEncryptedImage(document.frontFile)
+                                                                                            } else null
+                                                                                            val b = document.backFile?.let {
+                                                                                                repository.readEncryptedImage(it)
+                                                                                            }
+                                                                                            f to b
+                                                                                        }
+                                                                                        front = images.first
+                                                                                        back = images.second
+                                                                                    } catch (e: CancellationException) {
+                                                                                        throw e
+                                                                                    } catch (e: Exception) {
+                                                                                        error = e.message ?: "Could not load this document."
                                                                                     }
                                                                                 }
 
@@ -945,7 +1432,7 @@ private fun WalletRoot(
                                                                                             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                                                                                 val bytes = if (isBack) back else front
                                                                                                 if (bytes != null) {
-                                                                                                    val bitmap = remember(bytes) { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }
+                                                                                                    val bitmap = rememberDecodedBitmap(bytes, 2000)
                                                                                                     if (bitmap != null) {
                                                                                                         Image(bitmap.asImageBitmap(), null, Modifier.fillMaxSize().graphicsLayer {
                                                                                                             if (isBack) rotationY = 180f
@@ -960,6 +1447,7 @@ private fun WalletRoot(
                                                                                             Modifier.align(Alignment.CenterHorizontally),
                                                                                             color = Color.White
                                                                                         )
+                                                                                        error?.let { Text(it, color = Color.White) }
                                                                                     }
                                                                                 }
                                                                             }
